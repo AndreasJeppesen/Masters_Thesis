@@ -1,0 +1,524 @@
+---
+title: "TGM Flat infer d"
+author: "Andreas"
+date: "2025-02-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Load packages
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, cmdstanr, posterior, ggridges, MASS, patchwork, latex2exp)
+```
+
+Load data simulation functions
+```{r}
+# For CPT-IP
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/CPT_IP_w_diff_and_linear_caut_wiener_sim_f.R")
+# For Conners' CPT
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/Conners_TGM_sim_f.R")
+# For RVP
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/RVP_TGM_sim_f.R")
+```
+
+
+Simulation environment
+```{r}
+nagents <- 15
+ntrials_pr_task <- c(450, 360, 300) # CPT-IP, Conners', RVP
+nconditions_pr_task <- c(3, 1, 1)
+ntargets_pr_task <- c(90, 324, 24)
+nFAtrials_RVP <- 5
+CPT_IP_stimuli <- read.csv("CPT_IP_stimuli.csv")
+ntasks <- 3
+```
+
+
+Set true param values
+
+```{r}
+# Set parameter values
+a <- runif(nagents, 1, 1.7)
+b <- runif(nagents, 0.3, 0.7)
+v <- runif(nagents, 0.8, 1.7)
+t <- runif(nagents, 0.2, 0.25)
+d <- array(c(0.5,2,4,
+             0.1,NA,NA,
+             1,NA,NA), dim = c(ntasks, max(nconditions_pr_task)))
+w <- runif(nagents, 0, 2)
+
+
+FA_means <- c(0, 0, 0)
+corr_matrix <- matrix(c(1, 0.9, 0.9,
+              0.9, 1, 0.9,
+              0.9, 0.9, 1), nrow = 3)
+variances <- diag(1, nrow = 3, ncol = 3) # In this case, Identity matrix
+covar_matrix <- variances %*% corr_matrix %*% variances
+
+
+
+FA <- mvrnorm(nagents, mu = FA_means, Sigma = corr_matrix) # Generate 3 correlated variables with m=0 and sd=1
+FA[,1] <- FA[,1] * 0.2 - 1.2 # change the mean and sd of each variable, so we dont get positive values of FA
+FA[,2] <- FA[,2] * 0.2 - 1.5
+FA[,3] <- FA[,3] * 0.2 - 0.6
+
+```
+
+
+Generate data
+```{r}
+sim_dat <- data.frame()
+
+for (s in 1:nagents){
+  # Generate CPT-IP data
+  CPT_IP_sim <- CPT_IP_w_diff_and_caut_wiener_sim_f(item_type = CPT_IP_stimuli$stim_type,
+                                                    v = v[s], a = a[s],
+                                                    b = b[s], tau = t[s],
+                                                    d = d[,1], FA = FA[s,1], w = w[s])
+
+  CPT_IP_sim <- CPT_IP_sim %>% subset(select = -item_type)
+  CPT_IP_sim$ID <- s
+  CPT_IP_sim$task_name <- "CPT-IP"
+  CPT_IP_sim$task_num <- 1
+  sim_dat <- rbind(sim_dat, CPT_IP_sim)
+  
+  # Generate Conners' CPT data
+  conners_sim <- Conners_TGM_sim_f(ntrials_pr_task[2], ntargets_pr_task[2],
+                                   v[s], a[s],
+                                   b[s], t[s],
+                                   d[1,2], FA[s,2], w[s])
+  conners_sim$ID <- s
+  conners_sim$task_name <- "Conners"
+  conners_sim$task_num <- 2
+  conners_sim$condition <- 4
+  sim_dat <- rbind(sim_dat, conners_sim)
+  
+  # Generate RVP data
+  RVP_sim <- RVP_TGM_sim_f(ntrials_pr_task[3], ntargets_pr_task[3], nFAtrials_RVP,
+                           v[s], a[s],
+                           b[s], t[s],
+                           d[1,3], FA[s,3], w[s])
+  RVP_sim$RT <- ifelse(RVP_sim$correct == 1, RVP_sim$RT, 0) # No incorrect RTs in RVP
+  RVP_sim$ID <- s
+  RVP_sim$task_name <- "RVP"
+  RVP_sim$task_num <- 3
+  RVP_sim$condition <- 5
+  sim_dat <- rbind(sim_dat, RVP_sim)
+  
+}
+sim_dat$incorrectRTs_present <- ifelse(sim_dat$task_name == "RVP", 0, 1)
+
+```
+
+
+Is there any observable differences in behavioral data between the low difficulties (0.1, 0.5, 1) ?
+
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Praktik/Modeling/CPT_wiener_sim_f.R")
+N = 15
+C = 5
+
+w <- runif(N, 0, 2)
+a <- runif(N, 1, 1.7)
+b <- 0.5
+v <- runif(N, 0.7, 1.7)
+t <- 0.2
+d <- c(0.1, 0.5, 1, 2, 4)
+
+caut <- array(NA, dim = c(N,C))
+EEA <- array(NA, dim = c(N,C))
+for (i in 1:N){
+  for (c in 1:C){
+    caut[i,c] <- a[i] + 0.2 * w[i] * d[c]
+    EEA[i,c] <- v[i] - 0.2 * d[c]
+    EEA[i,c] <- ifelse(EEA[i,c] < 0, 0, EEA[i,c])
+  }
+}
+
+sim <- data.frame()
+for(i in 1:N) {
+  for (c in 1:C) {
+    temp_d <- CPT_wiener_sim_f(150, 75, EEA[i,c], caut[i,c], b, t)
+    temp_d$ID <- i
+    temp_d$condition <- c
+    temp_d$d <- d[c]
+    temp_d$a <- a[i]
+    temp_d$v <- v[i]
+    temp_d$caut <- caut[i,c]
+    temp_d$EEA <- EEA[i,c]
+    sim <- rbind(sim, temp_d)
+  }
+}
+
+sim <- sim %>% mutate(d = as.factor(d),
+                      ID = as.factor(ID),
+                      correctRTs = ifelse(sim$RT > 0 & sim$correct == 1, sim$RT, NA),
+                      incorrectRTs = ifelse(sim$RT > 0 & sim$correct == 0, sim$RT, NA))
+
+sim %>% 
+  ggplot() +
+  geom_density(aes(x = correctRTs, y = ..count.., color = ID)) +
+  geom_label( aes(x=6, y=100, label="Correct RTs")) +
+  geom_density(aes(x = incorrectRTs, y = -..count.., color = ID)) +
+  geom_label( aes(x=6, y=-75, label="Incorrect RTs")) +
+  facet_wrap(.~d) +
+  theme_minimal() +
+  xlab("Time (s)") +
+  xlim(0,7.5)
+
+```
+
+
+
+
+Save true param values to csv
+```{r}
+true_params <- data.frame(s = seq(1:nagents), a, b, v, t, w,
+                          FA.1. = FA[,1], FA.2. = FA[,2], FA.3. = FA[,3])
+
+datetime <- as.character(Sys.time())
+datetime <- gsub(":", "", datetime)
+
+write.csv(true_params, paste("TGM_flat_infer_d_true_params", paste0(datetime, ".csv")))
+write.csv(true_params, paste("TGM_flat_infer_d_sim_dat", paste0(datetime, ".csv")))
+
+```
+
+
+
+
+Compile Stan model
+```{r}
+file <- file.path("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/task_general_diffusion_mod_flat_infer_d_partialsum.stan")
+
+TGM_mod_flat <- cmdstan_model(file, cpp_options = list(stan_threads = TRUE))
+```
+
+
+Set priors
+```{r}
+a_prior_m <- 0
+a_prior_sd <- 1
+b_prior_m <- 0
+b_prior_sd <- 1
+v_prior_m <- 0
+v_prior_sd <- 1
+t_prior_m <- 0
+t_prior_sd <- 1
+d_prior_m <- 0
+d_prior_sd <- 1
+FA_prior_m <- 0
+# FA_prior_sd <- 1
+w_prior_m <- 0
+w_prior_sd <- 1
+```
+
+
+
+-- Prepare data for Stan
+```{r}
+ntrials <- array(NA, dim = nagents)
+for (s in 1:nagents){
+  ntrials[s] <- length(sim_dat$trial[sim_dat$ID == s]) # number of trials pr participant
+}
+
+maxntrials <- max(ntrials) # Maximal number of trials a participant has completed
+nconditions <- sum(nconditions_pr_task) # Total number of conditions
+
+# Empty arrays to fill
+target_present <- array(0, dim = c(maxntrials, nagents))
+button_pressed <- array(0, dim = c(maxntrials, nagents))
+correct <- array(0, dim = c(maxntrials, nagents))
+RT <- array(0, dim = c(maxntrials, nagents))
+falsealarm <- array(0, dim = c(maxntrials, nagents))
+incorrectRTs_present <- array(0, dim = c(maxntrials, nagents))
+ncorrectRTs <- array(0, dim = nagents)
+nincorrectRTs <- array(0, dim = nagents)
+condition_dum <- array(0, dim = c(maxntrials, nconditions, nagents))
+task_dum <- array(0, dim = c(maxntrials, ntasks, nagents))
+min_rt <- array(0, dim = nagents)
+
+
+
+for (s in 1:nagents){
+  target_present[1:ntrials[s],s] <- sim_dat$target_present[sim_dat$ID == s]
+  button_pressed[1:ntrials[s],s] <- sim_dat$button_pressed[sim_dat$ID == s]
+  correct[1:ntrials[s],s] <- sim_dat$correct[sim_dat$ID == s]
+  RT[1:ntrials[s],s] <- sim_dat$RT[sim_dat$ID == s]
+  falsealarm[1:ntrials[s],s] <- sim_dat$FA_trial[sim_dat$ID == s]
+  incorrectRTs_present[1:ntrials[s],s] <- sim_dat$incorrectRTs_present[sim_dat$ID == s]
+  ncorrectRTs[s] <- sum(sim_dat$button_pressed[sim_dat$correct == 1 &
+                                                 sim_dat$RT > 0 &
+                                                 sim_dat$ID == s])
+  nincorrectRTs[s] <- sum(sim_dat$button_pressed[sim_dat$correct == 0 &
+                                                 sim_dat$RT > 0 &
+                                                 sim_dat$ID == s])
+  min_rt[s] <- min(sim_dat$RT[sim_dat$RT > 0 & sim_dat$ID == s])
+  
+  for (i in 1:ntrials[s]){
+    condition_dum[i, sim_dat$condition[sim_dat$ID == s][i], s] <- 1
+    task_dum[i, sim_dat$task_num[sim_dat$ID == s][i], s] <- 1
+  }
+  
+}
+
+A_T <- chol(covar_matrix) # Cholesky decomposition
+
+A <- t(A_T)
+
+data <- list(nagents = nagents,
+             ntrials = ntrials,
+             maxntrials = maxntrials,
+             nconditions = nconditions,
+             ntasks = ntasks,
+             target_present = target_present,
+             button_pressed = button_pressed,
+             correct = correct,
+             RT = RT,
+             falsealarm = falsealarm,
+             incorrectRTs_present = incorrectRTs_present,
+             ncorrectRTs = ncorrectRTs,
+             nincorrectRTs = nincorrectRTs,
+             condition_dum = condition_dum,
+             task_dum = task_dum,
+             min_rt = min_rt,
+             A = A,
+             
+             a_prior_m = a_prior_m,
+             a_prior_sd = a_prior_sd,
+             b_prior_m = b_prior_m,
+             b_prior_sd = b_prior_sd,
+             v_prior_m = v_prior_m,
+             v_prior_sd = v_prior_sd,
+             t_prior_m =  t_prior_m,
+             t_prior_sd = t_prior_sd,
+             d_prior_m =  d_prior_m,
+             d_prior_sd = d_prior_sd,
+             w_prior_m =  w_prior_m,
+             w_prior_sd = w_prior_sd,
+             FA_prior_m = FA_prior_m
+             )
+
+```
+
+
+Fit model
+```{r}
+iter_warmup = 1000
+iter_sampling = 3000
+chains = 3
+
+# Start sampling
+samples <- TGM_mod_flat$sample(
+  data = data,
+  seed = 123,
+  chains = chains,
+  parallel_chains = chains,
+  threads_per_chain = 2,
+  iter_warmup = iter_warmup,
+  iter_sampling = iter_sampling,
+  init = 0,
+  refresh = 10,
+  max_treedepth = 10,
+  adapt_delta = 0.99
+)
+```
+
+
+```{r}
+draws_df <- as_draws_df(samples$draws())
+
+dtrim <- draws_df %>% 
+  dplyr::select(
+  !starts_with("bias")
+) %>% dplyr::select(
+  !starts_with("EEA")
+) %>% dplyr::select(
+  !starts_with("caut")
+) %>% dplyr::select(
+  !starts_with("theta")
+)
+
+write.csv(dtrim, paste("draws_trim_TGM_flat_infer_d", paste0(datetime, ".csv")))
+```
+
+
+
+Load draws
+
+```{r}
+# draws_df <- read.csv("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params/draws_trim_TGM_flat_infer_d_2025-05-09_122801.561333.csv")
+
+draws_df <- read.csv("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params/draws_trim_TGM_flat_infer_d_2025-05-07_135920.768099.csv")
+
+
+```
+
+```{r}
+true_params <- read.csv("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params/TGM_flat_infer_d_true_params_2025-05-07_135920.768099.csv")
+```
+
+
+```{r}
+d <- array(c(0.5,2,4,
+             0.1,NA,NA,
+             1,NA,NA), dim = c(ntasks, max(nconditions_pr_task)))
+d_vec <- array(d, dim = 9)
+d_vec <- d_vec[!is.na(d_vec)]
+```
+
+
+```{r}
+draws_df %>% ggplot() +
+  geom_density(aes(log_d.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_d_prior.1.), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = expression(paste("Prior-Posterior Update check, log(", italic("d"), ") CPT-IP c1")),
+       x = expression(paste("log(", italic("d"), ")")),
+       y = "Density" ) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+draws_df %>% ggplot() +
+  geom_density(aes(d.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(d_prior.1.), fill = "blue", alpha = 0.3) +
+  geom_point(x = d_vec[1], y = -0.01) +
+  xlim(0, 10) +
+  theme_minimal() +
+  labs(title = expression(paste("Prior-Posterior Update check, ", italic("d"))),
+       x = expression(italic("d")),
+       y = "Density" )+
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+plot(density(draws_df$d.1.), col = "darkgreen", xlim = c(0,6), main = "Difficulty posteriors") +
+  abline(v = d_vec[1], col = "darkgreen", lty = "dashed") +
+  lines(density(draws_df$d.2.), col = "blue") +
+  abline(v = d_vec[2], col = "blue", lty = "dashed") +
+  lines(density(draws_df$d.3.), col = "purple") +
+  abline(v = d_vec[3], col = "purple", lty = "dashed") +
+  lines(density(draws_df$d.4.), col = "red") +
+  abline(v = d_vec[4], col = "red", lty = "dashed") +
+  lines(density(draws_df$d.5.), col = "orange") +
+  abline(v = d_vec[5], col = "orange", lty = "dashed")
+
+draws_df %>% ggplot() +
+  geom_density(aes(draws_df$d.1.), color = "darkgreen") +
+  geom_vline(xintercept = d_vec[1], color = "darkgreen", lty = "dashed") +
+  geom_density(aes(draws_df$d.2.), color = "blue") +
+  geom_vline(xintercept = d_vec[2], color = "blue", lty = "dashed") +
+  geom_density(aes(draws_df$d.3.), color = "purple") +
+  geom_vline(xintercept = d_vec[3], color = "purple", lty = "dashed") +
+  geom_density(aes(draws_df$d.4.), color = "red") +
+  geom_vline(xintercept = d_vec[4], color = "red", lty = "dashed") +
+  geom_density(aes(draws_df$d.5.), color = "orange") +
+  geom_vline(xintercept = d_vec[5], color = "orange", lty = "dashed") +
+  theme_minimal() +
+  labs(title = "Difficulty Posteriors",
+       x = expression(italic("d")),
+       y = "Density" ) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+```
+
+Param recov of other parameters than d
+
+Wrangle data a bit
+```{r}
+draws <- draws_df %>%
+  dplyr::select(-starts_with("d"), -starts_with("log_d"), -starts_with("log"), -starts_with("cont"), -starts_with("Hit_Rate"))
+
+draws <- draws %>% 
+  pivot_longer(cols = starts_with(c("a", "v", "t", "FA", "w", "b")),
+               values_to = "value", names_to = "varname")
+
+draws <- draws %>% 
+  mutate(#param = str_sub(str_extract(varname, "\\w+\\_?\\w+(?>=.\\d+)"), 1, -2))
+    param = sub("[.]+\\d+[.]?\\d*[.]?", "", varname),
+    ID = str_extract(str_extract(varname, "\\d+[.]\\d*"), "\\d+"),
+    task = str_sub(str_extract(str_extract(varname, "\\d+[.]\\d*"), "[.]\\d+"), start = 2),
+    type = ifelse(!is.na(str_extract(varname, "prior")), "Prior", "Posterior"),
+    ) %>% 
+  dplyr::select(-varname)
+
+draws <- draws %>% filter(type != "Prior")
+
+
+recov_summa <- draws %>% filter(param %in% c("a", "b", "v", "t", "w")) %>%
+  group_by(ID, param) %>%
+  summarize(infer_mean = as.numeric(mean(value))) %>%
+  pivot_wider(names_from = param, values_from = infer_mean)
+
+true_params_temp <- true_params %>% dplyr::select(s, a, b, v, t, w)
+colnames(true_params_temp) <- c("ID", "true_a", "true_b","true_v", "true_t", "true_w")
+
+recov_summa <- merge(recov_summa, true_params_temp, by = "ID")
+
+recov_summa <- recov_summa %>% mutate(
+  a = as.numeric(a),
+  b = as.numeric(b),
+  v = as.numeric(v),
+  t = as.numeric(t),
+  w = as.numeric(w)
+)
+
+```
+
+
+```{r}
+
+rec1 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_a, a)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\textit{a}$"),
+       x = TeX("True $\\textit{a}$"),
+       y = TeX("Mean inferred $\\textit{a}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec2 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_b, b)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\textit{b}$"),
+       x = TeX("True $\\textit{b}$"),
+       y = TeX("Mean inferred $\\textit{b}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec3 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_v, v)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\textit{v}$"),
+       x = TeX("True $\\textit{v}$"),
+       y = TeX("Mean inferred $\\textit{v}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec4 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_t, t)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\tau$"),
+       x = TeX("True $\\tau$"),
+       y = TeX("Mean inferred $\\tau$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec5 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_w, w)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter \\textit{w}"),
+       x = TeX("True \\textit{w}"),
+       y = TeX("Mean inferred \\textit{w}")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+(rec1 + rec2 + rec3) / (rec4 + rec5)
+
+```
+
+
+

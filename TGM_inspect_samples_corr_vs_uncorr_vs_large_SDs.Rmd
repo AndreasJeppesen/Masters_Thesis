@@ -1,0 +1,1408 @@
+---
+title: "TGM_inspect_samples"
+author: "Andreas"
+date: "2025-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Markdown for looking at the samples from TGM with correlated params and uncorrelated params, and making comparisons to see if the model gives an indication of whether our assumption of underlying individual params holds or not.
+
+Load packages
+```{r Load packages}
+library(pacman)
+pacman::p_load(tidyverse, ggridges, MASS, boot, latex2exp, patchwork)
+# defining a function for calculating the maximum of the posterior density (not exactly the same as the mode)
+MPD <- function(x) {
+  out = density(x)$x[which(density(x)$y==max(density(x)$y))]
+  out <- ifelse(length(out > 1), max(out), out)
+  return(out)
+}
+```
+
+
+Some simulation info
+```{r}
+ntrials_pr_task <- c(450, 360, 300) # CPT-IP, Conners', RVP
+nconditions_pr_task <- c(3, 1, 1)
+ntargets_pr_task <- c(90, 324, 24)
+ntasks <- 3
+d <- array(c(0.5,2,4,
+             0.1,NA,NA,
+             1,NA,NA), dim = c(ntasks, max(nconditions_pr_task)))
+d_vec <- array(d, dim = 9)
+d_vec <- d_vec[!is.na(d_vec)]
+```
+
+
+
+#### Related params
+
+
+Load draws data and true parameter values
+```{r Load draws files}
+filenames <- list.files(path = "C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params", pattern = "draws_trim_TGM_fixed_d_and_SD_v3_2025-03-10_125332.675184_agent_\\d+_init0.csv")
+
+draws_df <- data.frame()
+
+for (filename in filenames) {
+  single_agent_draws <- read.csv(paste0("draws_and_true_params/", filename))
+  draws_df <- rbind(draws_df, single_agent_draws)
+}
+
+true_params <- read.csv("draws_and_true_params/TGM_fixed_d_and_SD_true_params_2025-03-10_125332.675184.csv")
+```
+
+Load simulated data
+```{r}
+sim_dat <- read.csv("TGM_fixed_d_and_SD_sim_dat_2025-03-10_125332.675184.csv")
+```
+
+
+Wrangle data for visualization purposes
+```{r Data wrangling}
+# Turn to long format
+draws <- draws_df %>%
+  dplyr::select(-starts_with("d"), -starts_with("log_d")) %>%
+  pivot_longer(cols = starts_with(c("log", "a", "v", "t", "FA", "cont", "w", "b")),
+               values_to = "value", names_to = "varname") %>% 
+  mutate(#param = str_sub(str_extract(varname, "\\w+\\_?\\w+(?>=.\\d+)"), 1, -2))
+    param = sub("[.]+\\d+[.]?\\d*[.]?", "", varname),
+    # ID = str_extract(str_extract(varname, "\\d+[.]\\d*"), "\\d+"),
+    task = str_sub(str_extract(str_extract(varname, "\\d+[.]\\d*"), "[.]\\d+"), start = 2),
+    type = ifelse(!is.na(str_extract(varname, "prior")), "Prior", "Posterior"),
+    ) %>% 
+  dplyr::select(-varname)
+
+# draws$task <- ifelse(draws$param == "FA_prior", draws$ID, draws$task)
+# draws$ID <- ifelse(draws$param == "FA_prior", NA, draws$ID)
+# 
+# # Repeat priors for each agent
+# priors_full <- data.frame()
+# priors <- draws %>% filter(type == "Prior")
+# for (ID in unique(draws$ID)[!is.na(unique(draws$ID))]) {
+#   priors$ID <- ID
+#   priors_full <- rbind(priors_full, priors)
+# }
+# 
+# draws <- draws %>% filter(type != "Prior")
+# draws <- rbind(draws, priors_full)
+
+draws <- draws %>% filter(type != "Prior")
+
+```
+
+
+```{r lp test}
+
+draws_df %>% mutate(.chain = as.factor(.chain)) %>% ggplot() +
+  geom_line(aes(.iteration, lp__, color = .chain)) + 
+  theme_minimal() +
+  facet_wrap(.~ID)
+
+mean(draws_df$lp__)
+```
+
+
+Summarize the draws and plot against true param values
+
+```{r Summarize draws}
+recov_summa <- draws %>% filter(param %in% c("a_M", "b_M", "v_M", "t_M", "w")) %>%
+  group_by(ID, param) %>%
+  summarize(infer_mean = as.numeric(mean(value))) %>%
+  pivot_wider(names_from = param, values_from = infer_mean)
+
+true_params_temp <- true_params %>% dplyr::select(s, a_m, b_m, v_m, t_m, w)
+colnames(true_params_temp) <- c("ID", "true_a_M", "true_b_M","true_v_M", "true_t_M", "true_w")
+
+recov_summa <- merge(recov_summa, true_params_temp, by = "ID")
+
+recov_summa <- recov_summa %>% mutate(
+  a_M = as.numeric(a_M),
+  b_M = as.numeric(b_M),
+  v_M = as.numeric(v_M),
+  t_M = as.numeric(t_M)
+)
+
+```
+
+
+```{r Plot recovery}
+
+
+rec1 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_a_M, a_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{a}}$"),
+       x = TeX("True $\\mu_{\\textit{a}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{a}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec2 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_b_M, b_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{b}}$"),
+       x = TeX("True $\\mu_{\\textit{b}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{b}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec3 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_v_M, v_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{v}}$"),
+       x = TeX("True $\\mu_{\\textit{v}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{v}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec4 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_t_M, t_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\tau}$"),
+       x = TeX("True $\\mu_{\\tau}$"),
+       y = TeX("Mean inferred $\\mu_{\\tau}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+rec5 <- recov_summa %>% ggplot() +
+  geom_point(aes(true_w, w)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter \\textit{w}"),
+       x = TeX("True \\textit{w}"),
+       y = TeX("Mean inferred \\textit{w}")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+(rec1 + rec2 + rec3) / (rec4 + rec5)
+
+```
+
+
+The participant that is grossly overestimated (agent w/ ID = 3) happens to have a very low true t, but very high true a and very low true b (with a pretty low true v as well). All this together makes for high RTs and a high minimum RT
+
+
+
+Plot recoveries of task-wise params
+
+```{r}
+recov_summa_taskwise <- draws %>% filter(param %in% c("a", "b", "v", "t", "FA")) %>%
+  group_by(ID, param, task) %>%
+  summarize(infer_mean = mean(value)) %>%
+  pivot_wider(names_from = c(param, task), values_from = infer_mean, names_sep = "")
+
+
+
+
+true_params_temp <- true_params %>% dplyr::select(s, a1, a2, a3, b1, b2, b3, v1, v2, v3, t1, t2, t3, FA1, FA2, FA3)
+colnames(true_params_temp) <- c("ID", "true_a1", "true_a2", "true_a3", "true_b1", "true_b2", "true_b3", "true_v1", "true_v2", "true_v3", "true_t1", "true_t2", "true_t3", "true_FA1", "true_FA2", "true_FA3")
+
+recov_summa_taskwise <- merge(recov_summa_taskwise, true_params_temp, by = "ID")
+```
+
+
+```{r Plot taskwise recov}
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_a1, a1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_a2, a2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_a3, a3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_b1, b1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_b2, b2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_b3, b3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_v1, v1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_v2, v2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_v3, v3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_t1, t1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_t2, t2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(true_t3, t3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(-true_FA1, FA1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(-true_FA2, FA2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise %>% ggplot() +
+  geom_point(aes(-true_FA3, FA3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+```
+
+
+
+
+Plot error in a against error in w
+There more w is overestimated, the more a is underestmated.
+```{r}
+plot(recov_summa$w - recov_summa$true_w, recov_summa$a_M - recov_summa$true_a_M)
+```
+
+
+
+
+
+
+```{r Plot update checks}
+##### a
+
+ppu1 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = a_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = a.1.1.), color = "red") +
+  geom_density(aes(x = a.1.2.), color = "red") +
+  geom_density(aes(x = a.1.3.), color = "red") +
+  geom_vline(xintercept = true_params$a_m[1]) +
+  geom_density(aes(x = a_M_prior, fill = "Prior"), alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{\\textit{a}}$"),
+       x = TeX("$\\mu_{\\textit{a}}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+
+ppu2 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = log_a_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = log_a.1.1.), color = "red") +
+  geom_density(aes(x = log_a.1.2.), color = "red") +
+  geom_density(aes(x = log_a.1.3.), color = "red") +
+  geom_density(aes(x = log_a_M_prior, fill = "Prior"), alpha = 0.3) +
+  #xlim(0,5) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{log(\\textit{a})}$"),
+       x = TeX("$\\mu_{log(\\textit{a})}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+
+##### b
+
+ppu3 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = b_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = b.1.1.), color = "red") +
+  geom_density(aes(x = b.1.2.), color = "red") +
+  geom_density(aes(x = b.1.3.), color = "red") +
+  geom_vline(xintercept = true_params$b_m[1]) +
+  geom_density(aes(x = b_M_prior, fill = "Prior"), alpha = 0.3) +
+  xlim(0,1) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{\\textit{b}}$"),
+       x = TeX("$\\mu_{\\textit{b}}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+ppu4 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = logit_b_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = logit_b.1.1.), color = "red") +
+  geom_density(aes(x = logit_b.1.2.), color = "red") +
+  geom_density(aes(x = logit_b.1.3.), color = "red") +
+  geom_density(aes(x = logit_b_M_prior, fill = "Prior"), alpha = 0.3) +
+  #xlim(0,1) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{logit(\\textit{b})}$"),
+       x = TeX("$\\mu_{logit(\\textit{b})}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+
+##### v
+
+ppu5 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = v_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = v.1.1.), color = "red") +
+  geom_density(aes(x = v.1.2.), color = "red") +
+  geom_density(aes(x = v.1.3.), color = "red") +
+  geom_vline(xintercept = true_params$v_m[1]) +
+  geom_density(aes(x = v_M_prior, fill = "Prior"), alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{\\textit{v}}$"),
+       x = TeX("$\\mu_{\\textit{v}}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+ppu6 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = log_v_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = log_v.1.1.), color = "red") +
+  geom_density(aes(x = log_v.1.2.), color = "red") +
+  geom_density(aes(x = log_v.1.3.), color = "red") +
+  geom_density(aes(x = log_v_M_prior, fill = "Prior"), alpha = 0.3) +
+  #xlim(0,5) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{log(\\textit{v})}$"),
+       x = TeX("$\\mu_{log(\\textit{v})}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+
+#### t
+
+ppu7 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = t_M.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = t.1.1.), color = "red") +
+  geom_density(aes(x = t.1.2.), color = "red") +
+  geom_density(aes(x = t.1.3.), color = "red") +
+  geom_vline(xintercept = true_params$t_m[1]) +
+  geom_density(aes(x = t_M_prior, fill = "Prior"), alpha = 0.3) +
+  xlim(0.1,0.3) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{\\tau}$"),
+       x = TeX("$\\mu_{\\tau}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+ppu8 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = log_t_M.1., fill = "Posterior"), alpha = 0.3) +
+  # geom_density(aes(x = t.1.1.), color = "red") +
+  # geom_density(aes(x = t.1.2.), color = "red") +
+  # geom_density(aes(x = t.1.3.), color = "red") +
+  geom_density(aes(x = log_t_M_prior, fill = "Prior"), alpha = 0.3) +
+  #xlim(0.1,0.3) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{log(\\tau)}$"),
+       x = TeX("$\\mu_{log(\\tau)}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+##### w
+
+ppu9 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = w.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = w_prior, fill = "Prior"), alpha = 0.3) +
+  geom_vline(xintercept = true_params$w[1]) +
+  xlim(0,5) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{\\textit{w}}$"),
+       x = TeX("$\\mu_{\\textit{w}}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+ppu10 <- draws_df %>% filter(ID==1) %>% ggplot() +
+  geom_density(aes(x = log_w.1., fill = "Posterior"), alpha = 0.3) +
+  geom_density(aes(x = log_w_prior, fill = "Prior"), alpha = 0.3) +
+  #xlim(0,5) +
+  theme_minimal() +
+  scale_color_manual(breaks=c('Posterior', 'Prior'),
+                     values=c('Posterior'='red', 'Prior'='blue')) +
+  guides(fill=guide_legend(title="Distribution")) +
+  #facet_wrap(.~ID) +
+  labs(title = TeX("PPU Check, $\\mu_{log(\\textit{w})}$"),
+       x = TeX("$\\mu_{log(\\textit{w})}$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"),
+        legend.position = "none")
+
+
+(ppu2 + ppu4 + ppu6) /
+  (ppu8 + ppu10)
+
+(ppu1 + ppu3 + ppu5) /
+  (ppu7 + ppu9)
+
+```
+
+
+
+
+
+
+Check chains:
+
+```{r Chain checks}
+draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_a_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_v_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = logit_b_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_t_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_w.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+```
+
+
+Check why one of the inferred t's is way off.
+```{r}
+sim_dat <- read.csv("TGM_fixed_d_and_SD_sim_dat_2025-03-10_125332.675184.csv")
+
+minRT_d <- sim_dat %>% filter(RT > 0) %>%  group_by(ID, task_num) %>% summarize(
+  minRT = min(RT)
+) %>% pivot_wider(names_from = task_num, values_from = minRT) %>% 
+  rename("minRT_t1" = `1`,
+         "minRT_t2" = `2`,
+         "minRT_t3" = `3`)
+
+minRT_d <- merge(minRT_d, recov_summa_taskwise, by = "ID")
+```
+
+```{r}
+plot(minRT_d$true_t1, minRT_d$minRT_t1, main = "True t and min RT")
+plot(minRT_d$true_t2, minRT_d$minRT_t2, main = "True t and min RT")
+plot(minRT_d$true_t3, minRT_d$minRT_t3, main = "True t and min RT")
+
+plot(minRT_d$minRT_t1, minRT_d$t1, main = "min RT and infered t")
+plot(minRT_d$minRT_t2, minRT_d$t2, main = "min RT and infered t")
+plot(minRT_d$minRT_t3, minRT_d$t3, main = "min RT and infered t")
+
+```
+
+
+Plot the data of agent 3:
+```{r}
+plot(density(sim_dat$RT[sim_dat$correct == 1 & sim_dat$RT > 0 & sim_dat$ID == 3]), main = "Correct RTs of agent 3.\n Very slow and not likely to be observed in real life.")
+```
+
+Inspect draws with PP-checks
+
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/visualization_functions/wiener_ppcheck_v2.R")
+```
+
+Look at first agent
+```{r}
+correct_RTs <- sim_dat$RT[sim_dat$correct == 1 & sim_dat$button_pressed == 1 & sim_dat$ID == 1]
+ntrials_pr_condition <- c(150,150,150,360,300)
+nconditions <- sum(nconditions_pr_task)
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df$a_M.1.[draws_df$ID == 1],
+               b_samples = draws_df$b_M.1.[draws_df$ID == 1],
+               v_samples = draws_df$v_M.1.[draws_df$ID == 1],
+               t_samples = draws_df$t_M.1.[draws_df$ID == 1],
+               w_samples = draws_df$w.1.[draws_df$ID == 1],
+               nconditions = 5,
+               d = d_vec
+               )
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df$a_M_prior[draws_df$ID == 1],
+               b_samples = draws_df$b_M_prior[draws_df$ID == 1],
+               v_samples = draws_df$v_M_prior[draws_df$ID == 1],
+               t_samples = draws_df$t_M_prior[draws_df$ID == 1],
+               w_samples = draws_df$w_prior[draws_df$ID == 1],
+               nconditions = 5,
+               d = d_vec
+               )
+
+#Error : object 'w' not found ???
+  
+#Indsæt print statements, som viser hvilken iteration den er i gang med at simulere 
+```
+
+
+
+
+
+#### Unrelated Parameters
+
+Load draws data and true parameter values
+```{r Load draws files}
+filenames_unr <- list.files(path = "C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params", pattern = "draws_trim_TGM_unrelated_params_fixed_d_and_SD_agent_\\d+_2025-03-19_094526.316031.csv")
+
+
+
+draws_df_unr <- data.frame()
+
+for (filename in filenames_unr) {
+  single_agent_draws <- read.csv(paste0("draws_and_true_params/", filename))
+  draws_df_unr <- rbind(draws_df_unr, single_agent_draws)
+}
+
+true_params_unr <- read.csv("draws_and_true_params/TGM_unrelated_params_fixed_d_and_SD_true_params_2025-03-19_094526.316031.csv")
+```
+
+Load simulated data
+```{r}
+sim_dat_unr <- read.csv("TGM_unrelated_params_fixed_d_and_SD_sim_dat_2025-03-19_094526.316031.csv")
+```
+
+
+
+Wrangle data for visualization purposes
+```{r Data wrangling}
+# Turn to long format
+draws_unr <- draws_df_unr %>%
+  dplyr::select(-starts_with("d"), -starts_with("log_d")) %>%
+  pivot_longer(cols = starts_with(c("log", "a", "v", "t", "FA", "cont", "w", "b")),
+               values_to = "value", names_to = "varname") %>% 
+  mutate(#param = str_sub(str_extract(varname, "\\w+\\_?\\w+(?>=.\\d+)"), 1, -2))
+    param = sub("[.]+\\d+[.]?\\d*[.]?", "", varname),
+    # ID = str_extract(str_extract(varname, "\\d+[.]\\d*"), "\\d+"),
+    task = str_sub(str_extract(str_extract(varname, "\\d+[.]\\d*"), "[.]\\d+"), start = 2),
+    type = ifelse(!is.na(str_extract(varname, "prior")), "Prior", "Posterior"),
+    ) %>% 
+  dplyr::select(-varname)
+
+draws_unr <- draws_unr %>% filter(type != "Prior")
+
+```
+
+
+```{r lp test}
+
+draws_df_unr %>% mutate(.chain = as.factor(.chain)) %>% ggplot() +
+  geom_line(aes(.iteration, lp__, color = .chain)) + 
+  theme_minimal() +
+  facet_wrap(.~ID)
+
+mean(draws_df_unr$lp__)
+
+
+```
+
+
+Summarize the draws and plot against true param values
+
+```{r Summarize draws}
+recov_summa_unr <- draws_unr %>% filter(param %in% c("a_M", "b_M", "v_M", "t_M", "w")) %>%
+  group_by(ID, param) %>%
+  summarize(infer_mean = as.numeric(mean(value))) %>%
+  pivot_wider(names_from = param, values_from = infer_mean)
+
+true_params_unr$a_m <- NA
+true_params_unr$b_m <- NA
+true_params_unr$v_m <- NA
+true_params_unr$t_m <- NA
+for (i in 1:nrow(true_params_unr)){
+  true_params_unr$a_m[i] <- mean(c(true_params_unr$a1[i],
+                                 true_params_unr$a2[i],
+                                 true_params_unr$a3[i]))
+  true_params_unr$b_m[i] <- mean(c(true_params_unr$b1[i],
+                                 true_params_unr$b2[i],
+                                 true_params_unr$b3[i]))
+  true_params_unr$v_m[i] <- mean(true_params_unr$v1[i],
+                                 true_params_unr$v2[i],
+                                 true_params_unr$v3[i])
+  true_params_unr$t_m[i] <- mean(c(true_params_unr$t1[i],
+                                 true_params_unr$t2[i],
+                                 true_params_unr$t3[i]))
+}
+
+true_params_temp_unr <- true_params_unr %>% dplyr::select(s, a_m, b_m, v_m, t_m, w)
+colnames(true_params_temp_unr) <- c("ID", "true_a_M", "true_b_M","true_v_M", "true_t_M", "true_w")
+
+recov_summa_unr <- merge(recov_summa_unr, true_params_temp_unr, by = "ID")
+
+recov_summa_unr <- recov_summa_unr %>% mutate(
+  a_M = as.numeric(a_M),
+  b_M = as.numeric(b_M),
+  v_M = as.numeric(v_M),
+  t_M = as.numeric(t_M)
+)
+
+```
+
+
+```{r Plot recovery}
+recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_a_M, a_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_b_M, b_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_v_M, v_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_t_M, t_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_w, w)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+
+unr1 <- recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_a_M, a_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{a}}$"),
+       x = TeX("True $\\mu_{\\textit{a}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{a}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+unr2 <- recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_b_M, b_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{b}}$"),
+       x = TeX("True $\\mu_{\\textit{b}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{b}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+unr3 <- recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_v_M, v_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{v}}$"),
+       x = TeX("True $\\mu_{\\textit{v}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{v}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+unr4 <- recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_t_M, t_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\tau}$"),
+       x = TeX("True $\\mu_{\\tau}$"),
+       y = TeX("Mean inferred $\\mu_{\\tau}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+unr5 <- recov_summa_unr %>% ggplot() +
+  geom_point(aes(true_w, w)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter \\textit{w}"),
+       x = TeX("True \\textit{w}"),
+       y = TeX("Mean inferred \\textit{w}")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+(unr1 + unr2 + unr3) / (unr4 + unr5)
+
+
+
+```
+
+
+Plot recoveries of task-wise params
+
+```{r}
+recov_summa_taskwise_unr <- draws_unr %>% filter(param %in% c("a", "b", "v", "t", "FA")) %>%
+  group_by(ID, param, task) %>%
+  summarize(infer_mean = mean(value)) %>%
+  pivot_wider(names_from = c(param, task), values_from = infer_mean, names_sep = "")
+
+
+
+
+true_params_temp_unr <- true_params_unr %>% dplyr::select(s, a1, a2, a3, b1, b2, b3, v1, v2, v3, t1, t2, t3, FA1, FA2, FA3)
+colnames(true_params_temp_unr) <- c("ID", "true_a1", "true_a2", "true_a3", "true_b1", "true_b2", "true_b3", "true_v1", "true_v2", "true_v3", "true_t1", "true_t2", "true_t3", "true_FA1", "true_FA2", "true_FA3")
+
+recov_summa_taskwise_unr <- merge(recov_summa_taskwise_unr, true_params_temp_unr, by = "ID")
+```
+
+```{r Plot taskwise recov}
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_a1, a1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_a2, a2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_a3, a3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_b1, b1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_b2, b2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_b3, b3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_v1, v1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_v2, v2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_v3, v3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_t1, t1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_t2, t2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(true_t3, t3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(-true_FA1, FA1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(-true_FA2, FA2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_unr %>% ggplot() +
+  geom_point(aes(-true_FA3, FA3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+```
+
+
+```{r Plot update checks}
+##### a
+
+draws_df_unr %>% ggplot() +
+  geom_density(aes(x = a_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = a.1.1.), color = "red") +
+  geom_density(aes(x = a.1.2.), color = "red") +
+  geom_density(aes(x = a.1.3.), color = "red") +
+  geom_density(aes(x = a_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal() +
+  facet_wrap(.~ID)
+
+
+
+##### v
+
+draws_df_unr %>% ggplot() +
+  geom_density(aes(x = v_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = v.1.1.), color = "red") +
+  geom_density(aes(x = v.1.2.), color = "red") +
+  geom_density(aes(x = v.1.3.), color = "red") +
+  geom_density(aes(x = v_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+
+
+##### w
+
+draws_df_unr %>% ggplot() +
+  geom_density(aes(x = w.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = w_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+
+
+##### b
+
+draws_df_unr %>% ggplot() +
+  geom_density(aes(x = b_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = b.1.1.), color = "red") +
+  geom_density(aes(x = b.1.2.), color = "red") +
+  geom_density(aes(x = b.1.3.), color = "red") +
+  geom_density(aes(x = b_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,1) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+
+
+##### t
+
+draws_df_unr %>% ggplot() +
+  geom_density(aes(x = t_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = t.1.1.), color = "red") +
+  geom_density(aes(x = t.1.2.), color = "red") +
+  geom_density(aes(x = t.1.3.), color = "red") +
+  geom_density(aes(x = t_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0.1,0.3) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+```
+
+
+Check chains; when does it sample very low values?
+
+```{r Chain checks}
+draws_df_unr %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_a_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_unr %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_v_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_unr %>% ggplot() +
+  geom_line(aes(x = .iteration, y = logit_b_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_unr %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_t_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_unr %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_w.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+```
+PP Checks
+
+Inspect draws with PP-checks
+
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/visualization_functions/wiener_ppcheck_v2.R")
+```
+
+```{r}
+correct_RTs <- sim_dat_unr$RT[sim_dat_unr$correct == 1 & sim_dat_unr$button_pressed == 1 & sim_dat_unr$ID == 1]
+ntrials_pr_condition <- c(150,150,150,360,300)
+nconditions <- length(unique(sim_dat_unr$condition))
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df_unr$a_M.1.[draws_df_unr$ID == 1],
+               b_samples = draws_df_unr$b_M.1.[draws_df_unr$ID == 1],
+               v_samples = draws_df_unr$v_M.1.[draws_df_unr$ID == 1],
+               t_samples = draws_df_unr$t_M.1.[draws_df_unr$ID == 1],
+               w_samples = draws_df_unr$w.1.[draws_df_unr$ID == 1],
+               nconditions = 5,
+               d = d_vec
+               )
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df_unr$a_M_prior[draws_df_unr$ID == 1],
+               b_samples = draws_df_unr$b_M_prior[draws_df_unr$ID == 1],
+               v_samples = draws_df_unr$v_M_prior[draws_df_unr$ID == 1],
+               t_samples = draws_df_unr$t_M_prior[draws_df_unr$ID == 1],
+               w_samples = draws_df_unr$w_prior[draws_df_unr$ID == 1],
+               nconditions = 5,
+               d = d_vec,
+               prior_only = TRUE
+               )
+```
+
+
+
+#### Related, Large SDs
+
+
+Load draws data and true parameter values
+```{r Load draws files}
+filenames_lsd <- list.files(path = "C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params", pattern = "draws_trim_TGM_unrelated_params_fixed_d_and_large_SD_agent_\\d+_2025-04-02_105828.565123.csv")
+
+
+draws_df_lsd <- data.frame()
+
+for (filename in filenames_lsd) {
+  single_agent_draws <- read.csv(paste0("draws_and_true_params/", filename))
+  draws_df_lsd <- rbind(draws_df_lsd, single_agent_draws)
+}
+
+true_params_lsd <- read.csv("draws_and_true_params/TGM_unr_params_large_SD_true_params_2025-04-02_105828.565123.csv")
+```
+
+Load simulated data
+```{r}
+sim_dat_lsd <- read.csv("TGM_unr_params_large_SD_sim_dat_2025-04-02_105828.565123.csv")
+```
+
+
+Wrangle data for visualization purposes
+```{r Data wrangling}
+# Turn to long format
+draws_lsd <- draws_df_lsd %>%
+  dplyr::select(-starts_with("d"), -starts_with("log_d")) %>%
+  pivot_longer(cols = starts_with(c("log", "a", "v", "t", "FA", "cont", "w", "b")),
+               values_to = "value", names_to = "varname") %>% 
+  mutate(#param = str_sub(str_extract(varname, "\\w+\\_?\\w+(?>=.\\d+)"), 1, -2))
+    param = sub("[.]+\\d+[.]?\\d*[.]?", "", varname),
+    # ID = str_extract(str_extract(varname, "\\d+[.]\\d*"), "\\d+"),
+    task = str_sub(str_extract(str_extract(varname, "\\d+[.]\\d*"), "[.]\\d+"), start = 2),
+    type = ifelse(!is.na(str_extract(varname, "prior")), "Prior", "Posterior"),
+    ) %>% 
+  dplyr::select(-varname)
+
+# draws$task <- ifelse(draws$param == "FA_prior", draws$ID, draws$task)
+# draws$ID <- ifelse(draws$param == "FA_prior", NA, draws$ID)
+# 
+# # Repeat priors for each agent
+# priors_full <- data.frame()
+# priors <- draws %>% filter(type == "Prior")
+# for (ID in unique(draws$ID)[!is.na(unique(draws$ID))]) {
+#   priors$ID <- ID
+#   priors_full <- rbind(priors_full, priors)
+# }
+# 
+# draws <- draws %>% filter(type != "Prior")
+# draws <- rbind(draws, priors_full)
+
+draws_lsd <- draws_lsd %>% filter(type != "Prior")
+
+```
+
+
+```{r lp test}
+
+draws_df_lsd %>% mutate(.chain = as.factor(.chain)) %>% ggplot() +
+  geom_line(aes(.iteration, lp__, color = .chain)) + 
+  theme_minimal() +
+  facet_wrap(.~ID)
+
+mean(draws_df_lsd$lp__)
+```
+
+
+Summarize the draws and plot against true param values
+
+```{r Summarize draws}
+recov_summa_lsd <- draws_lsd %>% filter(param %in% c("a_M", "b_M", "v_M", "t_M", "w")) %>%
+  group_by(ID, param) %>%
+  summarize(infer_mean = as.numeric(mean(value))) %>%
+  pivot_wider(names_from = param, values_from = infer_mean)
+
+true_params_temp_lsd <- true_params_lsd %>% dplyr::select(s, a_m, b_m, v_m, t_m, w)
+colnames(true_params_temp_lsd) <- c("ID", "true_a_M", "true_b_M","true_v_M", "true_t_M", "true_w")
+
+recov_summa_lsd <- merge(recov_summa_lsd, true_params_temp_lsd, by = "ID")
+
+recov_summa_lsd <- recov_summa_lsd %>% mutate(
+  a_M = as.numeric(a_M),
+  b_M = as.numeric(b_M),
+  v_M = as.numeric(v_M),
+  t_M = as.numeric(t_M)
+)
+
+```
+
+
+```{r Plot recovery}
+
+
+recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_a_M, a_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_b_M, b_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_v_M, v_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_t_M, t_M)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_w, w)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+lsd1 <- recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_a_M, a_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{a}}$"),
+       x = TeX("True $\\mu_{\\textit{a}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{a}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+lsd2 <- recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_b_M, b_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{b}}$"),
+       x = TeX("True $\\mu_{\\textit{b}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{b}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+lsd3 <- recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_v_M, v_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\textit{v}}$"),
+       x = TeX("True $\\mu_{\\textit{v}}$"),
+       y = TeX("Mean inferred $\\mu_{\\textit{v}}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+lsd4 <- recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_t_M, t_M)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\mu_{\\tau}$"),
+       x = TeX("True $\\mu_{\\tau}$"),
+       y = TeX("Mean inferred $\\mu_{\\tau}$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+lsd5 <- recov_summa_lsd %>% ggplot() +
+  geom_point(aes(true_w, w)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter \\textit{w}"),
+       x = TeX("True \\textit{w}"),
+       y = TeX("Mean inferred \\textit{w}")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+(lsd1 + lsd2 + lsd3) / (lsd4 + lsd5)
+
+
+```
+
+
+
+
+Plot recoveries of task-wise params
+
+```{r}
+recov_summa_taskwise_lsd <- draws_lsd %>% filter(param %in% c("a", "b", "v", "t", "FA")) %>%
+  group_by(ID, param, task) %>%
+  summarize(infer_mean = mean(value)) %>%
+  pivot_wider(names_from = c(param, task), values_from = infer_mean, names_sep = "")
+
+
+
+
+true_params_temp_lsd <- true_params_lsd %>% dplyr::select(s, a1, a2, a3, b1, b2, b3, v1, v2, v3, t1, t2, t3, FA1, FA2, FA3)
+colnames(true_params_temp_lsd) <- c("ID", "true_a1", "true_a2", "true_a3", "true_b1", "true_b2", "true_b3", "true_v1", "true_v2", "true_v3", "true_t1", "true_t2", "true_t3", "true_FA1", "true_FA2", "true_FA3")
+
+recov_summa_taskwise_lsd <- merge(recov_summa_taskwise_lsd, true_params_temp_lsd, by = "ID")
+```
+
+
+```{r Plot taskwise recov}
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_a1, a1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_a2, a2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_a3, a3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_b1, b1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_b2, b2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_b3, b3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_v1, v1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_v2, v2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_v3, v3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_t1, t1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_t2, t2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(true_t3, t3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(-true_FA1, FA1)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(-true_FA2, FA2)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+
+recov_summa_taskwise_lsd %>% ggplot() +
+  geom_point(aes(-true_FA3, FA3)) +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_minimal()
+```
+
+
+
+
+
+```{r Plot update checks}
+##### a
+
+draws_df_lsd %>% ggplot() +
+  geom_density(aes(x = a_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = a.1.1.), color = "red") +
+  geom_density(aes(x = a.1.2.), color = "red") +
+  geom_density(aes(x = a.1.3.), color = "red") +
+  geom_density(aes(x = a_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal() +
+  facet_wrap(.~ID)
+
+
+
+##### v
+
+draws_df_lsd %>% ggplot() +
+  geom_density(aes(x = v_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = v.1.1.), color = "red") +
+  geom_density(aes(x = v.1.2.), color = "red") +
+  geom_density(aes(x = v.1.3.), color = "red") +
+  geom_density(aes(x = v_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+
+
+##### w
+
+draws_df_lsd %>% ggplot() +
+  geom_density(aes(x = w.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = w_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,5) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+
+
+##### b
+
+draws_df_lsd %>% ggplot() +
+  geom_density(aes(x = b_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = b.1.1.), color = "red") +
+  geom_density(aes(x = b.1.2.), color = "red") +
+  geom_density(aes(x = b.1.3.), color = "red") +
+  geom_density(aes(x = b_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,1) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+
+
+##### t
+
+draws_df_lsd %>% ggplot() +
+  geom_density(aes(x = t_M.1.), fill = "red", alpha = 0.3) +
+  geom_density(aes(x = t.1.1.), color = "red") +
+  geom_density(aes(x = t.1.2.), color = "red") +
+  geom_density(aes(x = t.1.3.), color = "red") +
+  geom_density(aes(x = t_M_prior), fill = "blue", alpha = 0.3) +
+  xlim(0.1,0.3) +
+  theme_minimal()+
+  facet_wrap(.~ID)
+```
+
+
+
+
+
+
+Check chains:
+
+```{r Chain checks}
+draws_df_lsd %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_a_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_lsd %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_v_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_lsd %>% ggplot() +
+  geom_line(aes(x = .iteration, y = logit_b_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_lsd %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_t_M.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+draws_df_lsd %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_w.1., color = as.factor(.chain)))+
+  facet_wrap(.~ID)
+
+```
+
+Inspect draws with PP-checks
+
+Look at first agent
+```{r}
+correct_RTs <- sim_dat_lsd$RT[sim_dat_lsd$correct == 1 & sim_dat_lsd$button_pressed == 1 & sim_dat_lsd$ID == 1]
+ntrials_pr_condition <- c(150,150,150,360,300)
+nconditions <- sum(nconditions_pr_task)
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df_lsd$a_M.1.[draws_df_lsd$ID == 1],
+               b_samples = draws_df_lsd$b_M.1.[draws_df_lsd$ID == 1],
+               v_samples = draws_df_lsd$v_M.1.[draws_df_lsd$ID == 1],
+               t_samples = draws_df_lsd$t_M.1.[draws_df_lsd$ID == 1],
+               w_samples = draws_df_lsd$w.1.[draws_df_lsd$ID == 1],
+               nconditions = 5,
+               d = d_vec
+               )
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df_lsd$a_M_prior[draws_df_lsd$ID == 1],
+               b_samples = draws_df_lsd$b_M_prior[draws_df_lsd$ID == 1],
+               v_samples = draws_df_lsd$v_M_prior[draws_df_lsd$ID == 1],
+               t_samples = draws_df_lsd$t_M_prior[draws_df_lsd$ID == 1],
+               w_samples = draws_df_lsd$w_prior[draws_df_lsd$ID == 1],
+               nconditions = 5,
+               d = d_vec
+               )
+
+#Error : object 'w' not found ???
+  
+#Indsæt print statements, som viser hvilken iteration den er i gang med at simulere 
+```
+

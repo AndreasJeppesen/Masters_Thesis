@@ -1,0 +1,846 @@
+---
+title: "TGM validation"
+author: "Andreas"
+date: "2025-01-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+Load packages
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, cmdstanr, posterior, ggridges, MASS)
+
+z <- function(x) {
+  return( (x-mean(x))/sd(x) )
+}
+
+```
+
+
+Load data simulation functions
+```{r}
+# For CPT-IP
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/CPT_IP_w_diff_and_linear_caut_wiener_sim_f.R")
+# For Conners' CPT
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/Conners_TGM_sim_f.R")
+# For RVP
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/RVP_TGM_sim_f.R")
+```
+
+
+Simulation environment
+```{r}
+nagents <- 30
+ntrials_pr_task <- c(450, 360, 300) # CPT-IP, Conners', RVP
+nconditions_pr_task <- c(3, 1, 1)
+ntargets_pr_task <- c(90, 324, 24)
+nFAtrials_RVP <- 5
+CPT_IP_stimuli <- read.csv("CPT_IP_stimuli.csv")
+ntasks <- 3
+```
+
+
+Simulate data
+
+--Set true param values
+```{r}
+# Set true param values
+a_m <- runif(nagents, 1, 2)
+a_sd <- runif(nagents, 0.01, 0.03)
+b_m <- runif(nagents, 0.3, 0.7)
+b_sd <- runif(nagents,  0.01, 0.03)
+v_m <- runif(nagents, 1, 2)
+v_sd <- runif(nagents, 0.01, 0.03)
+t_m <- runif(nagents, 0.2, 0.25)
+t_sd <- runif(nagents, 0.002, 0.004)
+
+FA_means <- c(0, 0, 0)
+corr_matrix <- matrix(c(1, 0.9, 0.9,
+              0.9, 1, 0.9,
+              0.9, 0.9, 1), nrow = 3)
+variances <- diag(1, nrow = 3, ncol = 3) # In this case, Identity matrix
+covar_matrix <- variances %*% corr_matrix %*% variances
+
+
+
+FA <- mvrnorm(nagents, mu = FA_means, Sigma = corr_matrix) # Generate 3 correlated variables with m=0 and sd=1
+FA[,1] <- FA[,1] * 0.2 - 1.2 # change the mean and sd of each variable, so we dont get positive values of FA
+FA[,2] <- FA[,2] * 0.2 - 1.5
+FA[,3] <- FA[,3] * 0.2 - 0.6
+
+w <- runif(nagents, 0, 2)
+
+d <- array(c(0.5,2,4,
+             0.1,NA,NA,
+             1,NA,NA), dim = c(ntasks, max(nconditions_pr_task)))
+d_vec <- array(d, dim = 9)
+d_vec <- d_vec[!is.na(d_vec)]
+```
+
+-- Generate data
+```{r}
+# Task level param values
+true_as <- array(NA, dim = c(nagents, ntasks))
+true_bs <- array(NA, dim = c(nagents, ntasks))
+true_vs <- array(NA, dim = c(nagents, ntasks))
+true_ts <- array(NA, dim = c(nagents, ntasks))
+
+sim_dat <- data.frame()
+
+for (s in 1:nagents){
+  # draw param values for each of the tasks
+  true_as[s,] <- rnorm(ntasks, a_m[s], a_sd[s])
+  true_bs[s,] <- rnorm(ntasks, b_m[s], b_sd[s])
+  true_vs[s,] <- rnorm(ntasks, v_m[s], v_sd[s])
+  true_ts[s,] <- rnorm(ntasks, t_m[s], t_sd[s])
+  
+  # Generate CPT-IP data
+  CPT_IP_sim <- CPT_IP_w_diff_and_caut_wiener_sim_f(item_type = CPT_IP_stimuli$stim_type,
+                                                    v = true_vs[s,1], a = true_as[s,1],
+                                                    b = true_bs[s,1], tau = true_ts[s,1],
+                                                    d = d[,1], FA = FA[s,1], w = w[s])
+
+  CPT_IP_sim <- CPT_IP_sim %>% subset(select = -item_type)
+  CPT_IP_sim$ID <- s
+  CPT_IP_sim$task_name <- "CPT-IP"
+  CPT_IP_sim$task_num <- 1
+  sim_dat <- rbind(sim_dat, CPT_IP_sim)
+  
+  # Generate Conners' CPT data
+  conners_sim <- Conners_TGM_sim_f(ntrials_pr_task[2], ntargets_pr_task[2],
+                                   true_vs[s,2], true_as[s,2],
+                                   true_bs[s,2], true_ts[s,2],
+                                   d[1,2], FA[s,2], w[s])
+  conners_sim$ID <- s
+  conners_sim$task_name <- "Conners"
+  conners_sim$task_num <- 2
+  conners_sim$condition <- 4
+  sim_dat <- rbind(sim_dat, conners_sim)
+  
+  # Generate RVP data
+  RVP_sim <- RVP_TGM_sim_f(ntrials_pr_task[3], ntargets_pr_task[3], nFAtrials_RVP,
+                           true_vs[s,3], true_as[s,3],
+                           true_bs[s,3], true_ts[s,3],
+                           d[1,3], FA[s,3], w[s])
+  RVP_sim$RT <- ifelse(RVP_sim$correct == 1, RVP_sim$RT, 0) # No incorrect RTs in RVP
+  RVP_sim$ID <- s
+  RVP_sim$task_name <- "RVP"
+  RVP_sim$task_num <- 3
+  RVP_sim$condition <- 5
+  sim_dat <- rbind(sim_dat, RVP_sim)
+  
+}
+sim_dat$incorrectRTs_present <- ifelse(sim_dat$task_name == "RVP", 0, 1)
+
+```
+
+
+Save true param values to csv
+```{r}
+true_params <- data.frame(s = seq(1:nagents), a_m, a_sd, b_m, b_sd, v_m, v_sd, t_m, t_sd, w)
+
+for (task in 1:ntasks){
+  tnum <- as.character(task)
+  temp <- data.frame(matrix(NA, nrow = nagents, ncol = 5))
+  colnames(temp) <- c(paste0("a", tnum),
+                      paste0("b", tnum),
+                      paste0("v", tnum),
+                      paste0("t", tnum),
+                      paste0("FA", tnum))
+  temp[,1] <- true_as[,task]
+  temp[,2] <- true_bs[,task]
+  temp[,3] <- true_vs[,task]
+  temp[,4] <- true_ts[,task]
+  temp[,5] <- FA[,task]
+  true_params <- cbind(true_params, temp)
+}
+
+datetime <- as.character(Sys.time())
+datetime <- gsub(":", "", datetime)
+
+write.csv(true_params, paste("TGM_true_params", paste0(datetime, ".csv")))
+
+```
+
+
+
+
+
+Compile Stan model
+```{r}
+file <- file.path("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/task_general_diffusion_mod.stan")
+
+TGM_mod <- cmdstan_model(file)
+```
+
+
+Fit Stan model
+
+-- Set Priors
+```{r}
+a_M_prior_m <- 0
+a_M_prior_sd <- 1
+a_SD_prior_m <- 0
+a_SD_prior_sd <- 0.3
+b_M_prior_m <- 0
+b_M_prior_sd <- 1
+b_SD_prior_m <- 0
+b_SD_prior_sd <- 0.3
+v_M_prior_m <- 0
+v_M_prior_sd <- 1
+v_SD_prior_m <- 0
+v_SD_prior_sd <- 0.3
+t_M_prior_m <- 0
+t_M_prior_sd <- 1
+t_SD_prior_m <- 0
+t_SD_prior_sd <- 0.2
+
+d_prior_m <- 0
+d_prior_sd <- 1
+w_prior_m <- 0
+w_prior_sd <- 1
+FA_prior_m <- 0
+```
+
+
+
+-- Prepare data for Stan
+```{r}
+ntrials <- array(NA, dim = nagents)
+for (s in 1:nagents){
+  ntrials[s] <- length(sim_dat$trial[sim_dat$ID == s]) # number of trials pr participant
+}
+
+maxntrials <- max(ntrials) # Maximal number of trials a participant has completed
+nconditions <- sum(nconditions_pr_task) # Total number of conditions
+
+# Empty arrays to fill
+target_present <- array(0, dim = c(maxntrials, nagents))
+button_pressed <- array(0, dim = c(maxntrials, nagents))
+correct <- array(0, dim = c(maxntrials, nagents))
+RT <- array(0, dim = c(maxntrials, nagents))
+falsealarm <- array(0, dim = c(maxntrials, nagents))
+incorrectRTs_present <- array(0, dim = c(maxntrials, nagents))
+ncorrectRTs <- array(0, dim = nagents)
+nincorrectRTs <- array(0, dim = nagents)
+condition_dum <- array(0, dim = c(maxntrials, nconditions, nagents))
+task_dum <- array(0, dim = c(maxntrials, ntasks, nagents))
+min_rt <- array(0, dim = c(nagents, ntasks))
+
+
+
+for (s in 1:nagents){
+  target_present[1:ntrials[s],s] <- sim_dat$target_present[sim_dat$ID == s]
+  button_pressed[1:ntrials[s],s] <- sim_dat$button_pressed[sim_dat$ID == s]
+  correct[1:ntrials[s],s] <- sim_dat$correct[sim_dat$ID == s]
+  RT[1:ntrials[s],s] <- sim_dat$RT[sim_dat$ID == s]
+  falsealarm[1:ntrials[s],s] <- sim_dat$FA_trial[sim_dat$ID == s]
+  incorrectRTs_present[1:ntrials[s],s] <- sim_dat$incorrectRTs_present[sim_dat$ID == s]
+  ncorrectRTs[s] <- sum(sim_dat$button_pressed[sim_dat$correct == 1 &
+                                                 sim_dat$RT > 0 &
+                                                 sim_dat$ID == s])
+  nincorrectRTs[s] <- sum(sim_dat$button_pressed[sim_dat$correct == 0 &
+                                                 sim_dat$RT > 0 &
+                                                 sim_dat$ID == s])
+  
+  for (i in 1:ntrials[s]){
+    condition_dum[i, sim_dat$condition[sim_dat$ID == s][i], s] <- 1
+    task_dum[i, sim_dat$task_num[sim_dat$ID == s][i], s] <- 1
+  }
+  for (task in 1:ntasks){
+    min_rt[s,task] <- min(sim_dat$RT[sim_dat$RT > 0 & sim_dat$ID == s & sim_dat$task_num == task])
+  }
+}
+
+A_T <- chol(covar_matrix) # Cholesky decomposition
+
+A <- t(A_T)
+
+data <- list(nagents = nagents,
+             ntrials = ntrials,
+             maxntrials = maxntrials,
+             nconditions = nconditions,
+             ntasks = ntasks,
+             target_present = target_present,
+             button_pressed = button_pressed,
+             correct = correct,
+             RT = RT,
+             falsealarm = falsealarm,
+             incorrectRTs_present = incorrectRTs_present,
+             ncorrectRTs = ncorrectRTs,
+             nincorrectRTs = nincorrectRTs,
+             condition_dum = condition_dum,
+             task_dum = task_dum,
+             min_rt = min_rt,
+             A = A,
+             
+                a_M_prior_m = a_M_prior_m,
+                a_M_prior_sd = a_M_prior_sd,
+                a_SD_prior_m = a_SD_prior_m,
+                a_SD_prior_sd = a_SD_prior_sd,
+                b_M_prior_m = b_M_prior_m,
+                b_M_prior_sd = b_M_prior_sd,
+                b_SD_prior_m = b_SD_prior_m,
+                b_SD_prior_sd = b_SD_prior_sd,
+                v_M_prior_m = v_M_prior_m,
+                v_M_prior_sd = v_M_prior_sd,
+                v_SD_prior_m = v_SD_prior_m,
+                v_SD_prior_sd = v_SD_prior_sd,
+                t_M_prior_m = t_M_prior_m,
+                t_M_prior_sd = t_M_prior_sd,
+                t_SD_prior_m = t_SD_prior_m,
+                t_SD_prior_sd = t_SD_prior_sd,
+                
+                d_prior_m = d_prior_m,
+                d_prior_sd = d_prior_sd,
+                w_prior_m = w_prior_m,
+                w_prior_sd = w_prior_sd,
+                FA_prior_m = FA_prior_m
+             )
+
+```
+
+
+
+
+-- Fit model
+```{r}
+samples <- TGM_mod$sample(
+  data = data,
+  seed = 123,
+  chains = 3,
+  parallel_chains = 3,
+  iter_warmup = 1000,
+  iter_sampling = 3000,
+  refresh = 10,
+  max_treedepth = 10,
+  adapt_delta = 0.99
+)
+```
+
+
+
+Load draws data and true parameter values
+```{r}
+filenames <- list.files(path = "C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params", pattern = "draws_trim_TGM_fixed_d_and_SD_v3_2025-03-10_125332.675184_agent_\\d+_init0.csv")
+
+draws_df <- data.frame()
+
+for (filename in filenames) {
+  single_agent_draws <- read.csv(paste0("draws_and_true_params/", filename))
+  draws_df <- rbind(draws_df, single_agent_draws)
+}
+
+true_params <- read.csv("draws_and_true_params/TGM_fixed_d_and_SD_true_params_2025-03-10_125332.675184.csv")
+```
+
+Load Simulated data
+```{r}
+sim_dat <- read.csv("TGM_fixed_d_and_SD_sim_dat_2025-03-10_125332.675184.csv")
+
+d <- array(c(0.5,2,4,
+             0.1,NA,NA,
+             1,NA,NA), dim = c(ntasks, max(nconditions_pr_task)))
+d_vec <- array(d, dim = 9)
+d_vec <- d_vec[!is.na(d_vec)]
+```
+
+
+Inspect draws with PP-checks
+
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/visualization_functions/wiener_ppcheck_v2.R")
+```
+
+Look at first agent
+```{r}
+correct_RTs <- sim_dat$RT[sim_dat$correct == 1 & sim_dat$button_pressed == 1 & sim_dat$ID == 1]
+ntrials_pr_condition <- c(150,150,150,360,300)
+nconditions <- sum(nconditions_pr_task)
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df$a_M.1.[draws_df$ID == 1],
+               b_samples = draws_df$b_M.1.[draws_df$ID == 1],
+               v_samples = draws_df$v_M.1.[draws_df$ID == 1],
+               t_samples = draws_df$t_M.1.[draws_df$ID == 1],
+               w_samples = draws_df$w.1.[draws_df$ID == 1],
+               nconditions = 5,
+               d = d_vec
+               )
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df$a_M_prior[draws_df$ID == 1],
+               b_samples = draws_df$b_M_prior[draws_df$ID == 1],
+               v_samples = draws_df$v_M_prior[draws_df$ID == 1],
+               t_samples = draws_df$t_M_prior[draws_df$ID == 1],
+               w_samples = draws_df$w_prior[draws_df$ID == 1],
+               nconditions = 5,
+               d = d_vec, 
+               prior_only = TRUE
+               )
+
+
+  
+
+```
+
+PP checks of hit rate and com. rate
+```{r}
+theta <- function(a, b, v, w, d, FA, target_present) {
+  if (target_present == 1){
+    bias <- b
+  } else {
+    bias <- 1-b
+  }
+  EEA_given_d <- v - (0.2 * d)
+  EEA_given_d <- ifelse(EEA_given_d < 0, 0, EEA_given_d)
+  EEA <- EEA_given_d - FA
+  caut <- a + (0.2 * w * d)
+  
+  thet <- 1-( (1 - exp(-2*EEA*caut*(1-bias))) / (exp(2*EEA*caut*bias) - exp(-2*EEA*caut*(1-bias))) )
+  thet <- ifelse(is.nan(thet), bias, thet)
+  return(thet)
+}
+
+
+```
+
+```{r}
+draws_df1 <- draws_df %>% filter(ID == 1)
+n_conditions <- 5
+ntargets_pr_condition <- c(30,30,30,324,24)
+```
+
+
+hit rate
+```{r}
+theta_prior <- array(NA, dim = c(12000, 5))
+
+for (c in 1:5) {
+  for (i in 1:12000){}
+    theta_prior[,c] <- theta(draws_df1$a_M_prior,
+                                draws_df1$b_M_prior,
+                                draws_df1$v_M_prior,
+                                draws_df1$w_prior,
+                                d = d_vec[c],
+                                FA = 0,
+                                target_present = 1)
+}
+
+# sample_idx <- floor(runif(3000, min = 1, max = nrow(draws_df1)))
+# 
+# hit_rate_prior <- array(NA, dim = c(3000, n_conditions))
+# 
+# for (i in 1:length(sample_idx)){
+#   idx <- sample_idx[i]
+#   
+#   for (c in 1:n_conditions){
+#     temp <- rbinom(1, ntargets_pr_condition[c], theta_prior[idx,c]) / ntargets_pr_condition[c]
+#     hit_rate_prior[i,c] <- temp
+#   }
+# }
+
+hit_rate_prior_df <- data.frame(theta_prior)
+
+colnames(hit_rate_prior_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3",
+                                 "Conners'", "RVP")
+
+hit_rate_prior_df <- hit_rate_prior_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+cond_order <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3",
+                                 "Conners'", "RVP")
+
+hit_rate_prior_df <- hit_rate_prior_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+
+hit_rate_prior_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Prior Hit Rate predictions",
+       x = "Hit Rate",
+       y = "Density") +
+  theme(text = element_text(size = 14, family = "serif"))
+```
+
+
+```{r}
+### Posterior
+hit_rate_post <- array(NA, dim = c(12000, 5))
+
+
+for (c in 1:5) {
+  hit_rate_post[,c] <- theta(draws_df1$a_M.1.,
+                              draws_df1$b_M.1.,
+                              draws_df1$v_M.1.,
+                              draws_df1$w.1.,
+                              d = d_vec[c],
+                              FA = 0,
+                              target_present = 1)
+}
+
+hit_rate_post_df <- data.frame(hit_rate_post)
+
+colnames(hit_rate_post_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3",
+                                 "Conners'", "RVP")
+
+hit_rate_post_df <- hit_rate_post_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+hit_rate_post_df <- hit_rate_post_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+hit_rate_post_df$cond_num <- str_sub(hit_rate_post_df$Condition, -1, -1)
+
+true_hitrate <- data.frame("cond_num" = c(1,2,3,"'","P"), "true_hitrate" = NA)
+for (c in 1:n_conditions){
+  true_hitrate$true_hitrate[c] <- sum(sim_dat$button_pressed[sim_dat$target_present == 1 &
+                                                  sim_dat$ID == 1 &
+                                                  sim_dat$condition == c]) / ntargets_pr_condition[c]
+}
+true_hitrate$true_hitrate[2] <- true_hitrate$true_hitrate[2] + 0.003
+
+hit_rate_post_df <- merge(hit_rate_post_df, true_hitrate, by = "cond_num")
+
+hit_rate_post_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  geom_vline(aes(xintercept = true_hitrate, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Posterior Hit Rate predictions",
+       x = "Hit Rate",
+       y = "Density") +
+  guides(color = guide_legend(title = "Condition")) +
+  theme(text = element_text(size = 14, family = "serif"))
+  
+
+```
+
+
+com rate
+
+```{r}
+ndistractors_pr_condition <- ntrials_pr_condition - ntargets_pr_condition
+com_rate_prior <- array(NA, dim = c(12000, 5))
+
+for (c in 1:5) {
+  com_rate_prior[,c] <- 1 - theta(draws_df1$a_M_prior,
+                              draws_df1$b_M_prior,
+                              draws_df1$v_M_prior,
+                              draws_df1$w_prior,
+                              d = d_vec[c],
+                              FA = 0,
+                              target_present = 0)
+}
+
+com_rate_post <- array(NA, dim = c(12000, 5))
+
+for (c in 1:5) {
+  com_rate_post[,c] <- 1 - theta(draws_df1$a_M.1.,
+                              draws_df1$b_M.1.,
+                              draws_df1$v_M.1.,
+                              draws_df1$w.1.,
+                              d = d_vec[c],
+                              FA = 0,
+                              target_present = 0)
+}
+
+com_rate_prior_df <- data.frame(com_rate_prior)
+com_rate_post_df <- data.frame(com_rate_post)
+
+colnames(com_rate_prior_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3",
+                                 "Conners'", "RVP")
+colnames(com_rate_post_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3",
+                                 "Conners'", "RVP")
+
+com_rate_prior_df <- com_rate_prior_df %>% pivot_longer(names_to = "Condition", cols = everything())
+com_rate_post_df <- com_rate_post_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+cond_order <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3",
+                                 "Conners'", "RVP")
+
+com_rate_prior_df <- com_rate_prior_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+com_rate_post_df <- com_rate_post_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+
+com_rate_prior_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Prior Com. Rate predictions",
+       x = "Com. Rate",
+       y = "Density") +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+com_rate_post_df$cond_num <- str_sub(com_rate_post_df$Condition, -1, -1)
+
+true_comrate <- data.frame("cond_num" = c(1,2,3,"'","P"), "true_comrate" = NA)
+for (c in 1:n_conditions){
+  true_comrate$true_comrate[c] <- sum(sim_dat$button_pressed[sim_dat$target_present == 0 &
+                                                  sim_dat$ID == 1 &
+                                                  sim_dat$condition == c]) / ndistractors_pr_condition[c]
+}
+#true_comrate$true_comrate[2] <- true_comrate$true_comrate[2] + 0.003
+
+com_rate_post_df <- merge(com_rate_post_df, true_comrate, by = "cond_num")
+
+
+com_rate_post_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  geom_vline(aes(xintercept = true_comrate, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Posterior Com. Rate predictions",
+       x = "Com. Rate",
+       y = "Density") +
+  guides(color = guide_legend(title = "Condition")) +
+  theme(text = element_text(size = 14, family = "serif"))
+```
+
+
+
+
+Wrangle data for visualization purposes
+```{r Data wrangling}
+# Turn to long format
+draws <- draws_df %>%
+  dplyr::select(-starts_with("d"), -starts_with("log_d")) %>%
+  pivot_longer(cols = starts_with(c("log", "a", "v", "t", "FA", "cont", "w", "b")),
+               values_to = "value", names_to = "varname") %>% 
+  mutate(#param = str_sub(str_extract(varname, "\\w+\\_?\\w+(?>=.\\d+)"), 1, -2))
+    param = sub("[.]+\\d+[.]?\\d*[.]?", "", varname),
+    # ID = str_extract(str_extract(varname, "\\d+[.]\\d*"), "\\d+"),
+    task = str_sub(str_extract(str_extract(varname, "\\d+[.]\\d*"), "[.]\\d+"), start = 2),
+    type = ifelse(!is.na(str_extract(varname, "prior")), "Prior", "Posterior"),
+    ) %>% 
+  dplyr::select(-varname)
+
+
+draws <- draws %>% filter(type != "Prior")
+
+```
+
+
+Summarize the draws and plot against true param values
+
+```{r Summarize draws}
+recov_summa <- draws %>% filter(param %in% c("a_M", "b_M", "v_M", "t_M", "w")) %>%
+  group_by(ID, param) %>%
+  summarize(infer_mean = as.numeric(mean(value))) %>%
+  pivot_wider(names_from = param, values_from = infer_mean)
+
+true_params_temp <- true_params %>% dplyr::select(s, a_m, b_m, v_m, t_m, w)
+colnames(true_params_temp) <- c("ID", "true_a_M", "true_b_M","true_v_M", "true_t_M", "true_w")
+
+recov_summa <- merge(recov_summa, true_params_temp, by = "ID")
+
+recov_summa <- recov_summa %>% mutate(
+  a_M = as.numeric(a_M),
+  b_M = as.numeric(b_M),
+  v_M = as.numeric(v_M),
+  t_M = as.numeric(t_M)
+)
+
+```
+
+
+Preservation of ranking, Fit ordinal regression
+
+```{r}
+library(ordinal)
+# Get ranking of the true parameters
+true_params$rank_a <- rank(true_params$a_m)
+true_params$rank_b <- rank(true_params$b_m)
+true_params$rank_v <- rank(true_params$v_m)
+true_params$rank_t <- rank(true_params$t_m)
+true_params$rank_w <- rank(true_params$w)
+ranking_d <- true_params %>% dplyr::select(s, starts_with("rank"))
+ranking_d <- ranking_d %>% rename("ID" = s)
+
+draws_df <- merge(draws_df, ranking_d, by = "ID") # merge rankings with the draws
+
+
+draws_df$rank_a <- as.factor(draws_df$rank_a)
+draws_df$rank_b <- as.factor(draws_df$rank_b)
+draws_df$rank_v <- as.factor(draws_df$rank_v)
+draws_df$rank_t <- as.factor(draws_df$rank_t)
+draws_df$rank_w <- as.factor(draws_df$rank_w)
+#draws_df$rank_FA <- as.factor(draws_df$rank_FA)
+
+draws_df <- draws_df %>% 
+  mutate(
+    a_M_z = z(a_M.1.),
+    b_M_z = z(b_M.1.),
+    v_M_z = z(v_M.1.),
+    t_M_z = z(t_M.1.),
+    w_z = z(w.1.)
+  )
+
+
+# Fit models for each param
+
+m_a <- clm(rank_a ~ a_M_z, data = draws_df)
+
+m_b <- clm(rank_b ~ b_M_z, data = draws_df)
+
+m_v <- clm(rank_v ~ v_M_z, data = draws_df)
+
+m_t <- clm(rank_t ~ t_M_z, data = draws_df)
+
+m_w <- clm(rank_w ~ w_z, data = draws_df)
+
+#m_FA <- clm(rank_FA ~ FA, data = draws_df)
+
+
+m_a$coefficients["a_M_z"]
+m_b$coefficients["b_M_z"]
+m_v$coefficients["v_M_z"]
+m_t$coefficients["t_M_z"]
+m_w$coefficients["w_z"]
+#m_FA$coefficients["FA"]
+
+
+summary(m_a)
+summary(m_b)
+summary(m_v)
+summary(m_t)
+summary(m_w)
+#summary(m_FA)
+```
+
+Mean of absolute errors
+
+```{r}
+nagents <- 30
+niter <- 12000
+
+
+# a
+infer_a <- array(draws_df$a_M.1., dim = c(niter, nagents))
+infer_a <- t(infer_a) # transpose so that we have a row for each agent and column for each sample
+a_abs_err <- array(NA, dim = dim(infer_a))
+for (i in 1:nagents){
+  a_abs_err[i,] <- abs(infer_a[i,] - true_params$a_m[i])
+}
+a_mean_abs_err <- colMeans(a_abs_err)
+#plot(density(a_mean_abs_err))
+
+
+# b
+infer_b <- array(draws_df$b_M.1., dim = c(niter, nagents))
+infer_b <- t(infer_b) # transpose so that we have a row for each agent and column for each sample
+b_abs_err <- array(NA, dim = dim(infer_b))
+for (i in 1:nagents){
+  b_abs_err[i,] <- abs(infer_b[i,] - true_params$b_m[i])
+}
+b_mean_abs_err <- colMeans(b_abs_err)
+#plot(density(b_mean_abs_err))
+
+
+
+# v
+infer_v <- array(draws_df$v_M.1., dim = c(niter, nagents))
+infer_v <- t(infer_v) # transpose so that we have a row for each agent and column for each sample
+v_abs_err <- array(NA, dim = dim(infer_v))
+for (i in 1:nagents){
+  v_abs_err[i,] <- abs(infer_v[i,] - true_params$v_m[i])
+}
+v_mean_abs_err <- colMeans(v_abs_err)
+#plot(density(v_mean_abs_err))
+
+
+# t
+infer_t <- array(draws_df$t_M.1., dim = c(niter, nagents))
+infer_t <- t(infer_t) # transpose so that we have a row for each agent and column for each sample
+t_abs_err <- array(NA, dim = dim(infer_t))
+for (i in 1:nagents){
+  t_abs_err[i,] <- abs(infer_t[i,] - true_params$t_m[i])
+}
+t_mean_abs_err <- colMeans(t_abs_err)
+#plot(density(t_mean_abs_err))
+
+
+# w
+infer_w <- array(draws_df$w.1., dim = c(niter, nagents))
+infer_w <- t(infer_w) # transpose so that we have a row for each agent and column for each sample
+w_abs_err <- array(NA, dim = dim(infer_w))
+for (i in 1:nagents){
+  w_abs_err[i,] <- abs(infer_w[i,] - true_params$w[i])
+}
+w_mean_abs_err <- colMeans(w_abs_err)
+#plot(density(w_mean_abs_err))
+
+
+
+
+mean_abs_err_df <- data.frame(a_mean_abs_err, b_mean_abs_err, v_mean_abs_err, t_mean_abs_err, w_mean_abs_err)
+
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(a_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(b_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(v_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(t_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(w_mean_abs_err)) +
+  theme_minimal()
+
+
+
+```
+
+
+
+Inspect effect of w
+```{r}
+sim_dat <- data.frame()
+nsims <- 100
+w <- runif(nsims, 0.3, 3)
+for (s in 1:nsims){
+  
+  CPT_IP_sim <- CPT_IP_w_diff_and_caut_wiener_sim_f(item_type = CPT_IP_stimuli$stim_type,
+                                                    v = 1.2, a = 1.2,
+                                                    b = 0.5, tau = 0.2,
+                                                    d = c(5,10,20), FA = -1, w = w[s])
+  
+  CPT_IP_sim$ID <- s
+  CPT_IP_sim$task <- "CPT-IP"
+  
+  sim_dat <- rbind(sim_dat, CPT_IP_sim)
+  
+}
+HitRate <- sim_dat %>% filter(target_present == 1) %>% group_by(condition, ID) %>% summarise(hitrate = sum(correct)/90, mean_RT = mean(RT)) %>% mutate(w = w)
+
+HitRate %>% ggplot() +
+  geom_point(aes(x=w, y=hitrate)) +
+  facet_wrap(.~condition)
+
+HitRate %>% ggplot() +
+  geom_point(aes(x=w, y=mean_RT)) +
+  facet_wrap(.~condition)
+
+```
+
+
