@@ -1,0 +1,658 @@
+---
+title: "Conners' param recov"
+author: "Andreas"
+date: "2025-01-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Load packages
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, cmdstanr, posterior, ggridges, patchwork)
+
+# defining a function for calculating the maximum of the posterior density (not exactly the same as the mode)
+MPD <- function(x) {
+  density(x)$x[which(density(x)$y==max(density(x)$y))]
+}
+
+z <- function(x) {
+  return( (x-mean(x))/sd(x) )
+}
+```
+
+
+Load data simulation function
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/Conners_TGM_sim_f.R")
+ntrials <- 360
+ntargets <- 324
+
+nconditions <- 1
+```
+
+
+Compile Stan model
+```{r}
+file <- file.path("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_specific_models/conners_diffusion_model.stan")
+
+wiener_conners_mod = cmdstan_model(file)
+```
+
+
+Simulate a single session
+
+```{r}
+# Set parameter values
+a <- 1.2
+b <- 0.5
+v <- 2
+t <- 0.2
+FA <- - 1
+d <- c(0) # Only one condition, so no difficulty effect.
+w <- 0 # and nothing to adapt to
+
+# Simulate data
+sim_data1 <- Conners_TGM_sim_f(ntrials, ntargets, v, a, b, t, d, FA, w)
+
+# Look at the simulated data
+
+plot(density(sim_data1$RT[sim_data1$button_pressed == 1 & sim_data1$correct == 1]), main = "RTs (Correct trials)")
+plot(density(sim_data1$RT[sim_data1$button_pressed == 1 & sim_data1$correct == 0]), main = "RTs (Incorrect trials)")
+
+
+```
+
+
+Set priors
+```{r}
+a_prior_m <- 0
+a_prior_sd <- 1
+b_prior_m <- 0
+b_prior_sd <- 1
+v_prior_m <- 0
+v_prior_sd <- 1
+t_prior_m <- 0
+t_prior_sd <- 1
+FA_prior_m <- 0
+FA_prior_sd <- 1
+
+```
+
+
+
+Fit Stan model
+```{r}
+# Prepare data for Stan
+
+ncorrectRTs <- length(sim_data1$RT[sim_data1$RT > 0 & sim_data1$correct == 1])
+nincorrectRTs <- length(sim_data1$RT[sim_data1$RT > 0 & sim_data1$correct == 0])
+
+min_rt <- min(sim_data1$RT[sim_data1$RT > 0])
+
+
+data <- list(ntrials = ntrials,
+             button_pressed = sim_data1$button_pressed,
+             target_present = sim_data1$target_present,
+             correct = sim_data1$correct,
+             RT = sim_data1$RT,
+             falsealarm = sim_data1$FA_trial,
+             ncorrectRTs = ncorrectRTs,
+             nincorrectRTs = nincorrectRTs,
+             min_rt = min_rt,
+             
+             a_prior_m = a_prior_m,
+             a_prior_sd = a_prior_sd,
+             b_prior_m = b_prior_m,
+             b_prior_sd = b_prior_sd,
+             v_prior_m = v_prior_m,
+             v_prior_sd = v_prior_sd,
+             t_prior_m = t_prior_m,
+             t_prior_sd = t_prior_sd,
+             FA_prior_m = FA_prior_m,
+             FA_prior_sd = FA_prior_sd
+             )
+```
+
+```{r}
+# Start sampling
+samples <- wiener_conners_mod$sample(
+  data = data,
+  seed = 123,
+  chains = 3,
+  parallel_chains = 3,
+  iter_warmup = 1000,
+  iter_sampling = 3000,
+  refresh = 500,
+  max_treedepth = 10,
+  adapt_delta = 0.99
+)
+
+draws_df <- as_draws_df(samples$draws())
+
+
+```
+
+Visualize the model fit
+```{r}
+
+# Prior Posterior Update checks
+
+p1 <- draws_df %>% ggplot() +
+  geom_density(aes(log_a), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_a_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal()
+
+p2 <- draws_df %>% ggplot() +
+  geom_density(aes(a), fill = "red", alpha = 0.3) +
+  geom_density(aes(a_prior), fill = "blue", alpha = 0.3) +
+  geom_point(x = a, y = -0.1) +
+  xlim(0, 5) +
+  theme_minimal()
+
+p3 <- draws_df %>% ggplot() +
+  geom_density(aes(logit_b), fill = "red", alpha = 0.3) +
+  geom_density(aes(logit_b_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal()
+
+p4 <- draws_df %>% ggplot() +
+  geom_density(aes(b), fill = "red", alpha = 0.3) +
+  geom_density(aes(b_prior), fill = "blue", alpha = 0.3) +
+  geom_point(x = b, y = -0.1) +
+  theme_minimal()
+
+p5 <- draws_df %>% ggplot() +
+  geom_density(aes(cont_t), fill = "red", alpha = 0.3) +
+  geom_density(aes(cont_t_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal()
+
+p6 <- draws_df %>% ggplot() +
+  geom_density(aes(t), fill = "red", alpha = 0.3) +
+  geom_density(aes(t_prior), fill = "blue", alpha = 0.3) +
+  geom_point(x = t, y = -0.1) +
+  xlim(0,0.35) +
+  theme_minimal()
+
+p7 <- draws_df %>% ggplot() +
+  geom_density(aes(log_v), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_v_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal()
+
+p8 <- draws_df %>% ggplot() +
+  geom_density(aes(v), fill = "red", alpha = 0.3) +
+  geom_density(aes(v_prior), fill = "blue", alpha = 0.3) +
+  geom_point(x = v, y = -0.05) +
+  xlim(0,5) +
+  theme_minimal()
+
+p9 <- draws_df %>% ggplot() +
+  geom_density(aes(log_FA), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_FA_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal()
+
+p10 <- draws_df %>% ggplot() +
+  geom_density(aes(FA), fill = "red", alpha = 0.3) +
+  geom_density(aes(FA_prior), fill = "blue", alpha = 0.3) +
+  geom_point(x = - FA, y = -0.05) +
+  xlim(0,5) +
+  theme_minimal()
+
+(p1 + p2) / (p3 + p4) / (p5 + p6) / (p7 + p8) / (p9 + p10)
+
+```
+
+PP Checks
+
+```{r}
+
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/visualization_functions/wiener_ppcheck.R")
+
+correct_RTs <- sim_data1$RT[sim_data1$button_pressed == 1 & sim_data1$correct == 1]
+
+# Prior preds of RTs
+wiener_ppcheck(correct_RTs, draws_df, prior_only = TRUE, nconditions = nconditions, n_draws = 100)
+
+# Posterior preds RTs
+wiener_ppcheck(correct_RTs, draws_df, prior_only = FALSE, nconditions = nconditions, n_draws = 100)
+
+
+```
+
+
+Check Chains
+```{r}
+draws_df %>% mutate(chain = as.factor(.chain)) %>%  ggplot() +
+  geom_line(aes(x = .iteration, y = log_a, color = chain))
+
+draws_df %>% mutate(chain = as.factor(.chain)) %>%  ggplot() +
+  geom_line(aes(x = .iteration, y = logit_b, color = chain))
+
+draws_df %>% mutate(chain = as.factor(.chain)) %>%  ggplot() +
+  geom_line(aes(x = .iteration, y = cont_t, color = chain))
+
+draws_df %>% mutate(chain = as.factor(.chain)) %>%  ggplot() +
+  geom_line(aes(x = .iteration, y = log_v, color = chain))
+
+draws_df %>% mutate(chain = as.factor(.chain)) %>%  ggplot() +
+  geom_line(aes(x = .iteration, y = log_FA, color = chain))
+
+```
+
+
+True parameters and simulated data will be read in, so we use the same data all the way through
+
+```{r}
+true_params <- read.csv("draws_and_true_params/TGM_fixed_d_and_SD_true_params_2025-03-10_125332.675184.csv")
+ntrials_pr_task <- c(450, 360, 300) # CPT-IP, Conners', RVP
+nconditions_pr_task <- c(3, 1, 1)
+ntargets_pr_task <- c(90, 324, 24)
+ntasks <- 3
+d <- array(c(0.5,2,4,
+             0.1,NA,NA,
+             1,NA,NA), dim = c(ntasks, max(nconditions_pr_task)))
+conners_d <- d[1,2]
+
+sim_dat <- read.csv("TGM_fixed_d_and_SD_sim_dat_2025-03-10_125332.675184.csv")
+```
+
+
+Setup parameter recovery
+
+```{r}
+niter <- 30
+nchains <- 3
+nsamples <- 3000
+
+# true_a <- array(NA, niter)
+# true_b <- array(NA, niter)
+# true_v <- array(NA, niter)
+# true_t <- array(NA, niter)
+
+infer_a <- array(NA, dim = c(niter, nchains*nsamples))
+infer_b <- array(NA, dim = c(niter, nchains*nsamples))
+infer_v <- array(NA, dim = c(niter, nchains*nsamples))
+infer_t <- array(NA, dim = c(niter, nchains*nsamples))
+infer_FA <- array(NA, dim = c(niter, nchains*nsamples))
+
+for (i in 1:niter){
+  print(paste("ITERATION", i))
+  
+  # sample parameter values
+  # a <- runif(1, 0.5, 3)
+  # b <- runif(1, 0.3, 0.7)
+  # v <- runif(1, 0.5, 3)
+  # t <- runif(1, 0.100, 0.250)
+  # 
+  # true_a[i] <- a
+  # true_b[i] <- b
+  # true_v[i] <- v
+  # true_t[i] <- t
+  
+  
+  # Simulate data
+  # sim_data <- CPT_w_difficulties_wiener_sim_f(ntrials, ntargets, v, a, b, t, d)
+  sim_data <- sim_dat %>% filter(ID == i & task_name == "Conners")
+  
+  # Prepare data for Stan model
+  ncorrectRTs <- length(sim_data$RT[sim_data$RT > 0 & sim_data$correct == 1])
+  nincorrectRTs <- length(sim_data$RT[sim_data$RT > 0 & sim_data$correct == 0])
+  
+  min_rt <- min(sim_data$RT[sim_data$RT > 0])
+
+  data <- list(ntrials = ntrials,
+               button_pressed = sim_data$button_pressed,
+               target_present = sim_data$target_present,
+               correct = sim_data$correct,
+               RT = sim_data$RT,
+               falsealarm = sim_data$FA_trial,
+               ncorrectRTs = ncorrectRTs,
+               nincorrectRTs = nincorrectRTs,
+               min_rt = min_rt,
+               
+               a_prior_m = a_prior_m,
+               a_prior_sd = a_prior_sd,
+               b_prior_m = b_prior_m,
+               b_prior_sd = b_prior_sd,
+               v_prior_m = v_prior_m,
+               v_prior_sd = v_prior_sd,
+               t_prior_m = t_prior_m,
+               t_prior_sd = t_prior_sd,
+               FA_prior_m = FA_prior_m,
+               FA_prior_sd = FA_prior_sd
+               )
+  
+  # Start sampling
+  temp_samples <- wiener_conners_mod$sample(
+    data = data,
+    seed = 123,
+    chains = 3,
+    parallel_chains = nchains,
+    iter_warmup = 1000,
+    iter_sampling = nsamples,
+    refresh = 0,
+    max_treedepth = 10,
+    adapt_delta = 0.99
+  )
+  
+  # Record MPDs of posteriors
+  
+  infer_a[i,] <- temp_samples$draws(variables = "a")
+  infer_b[i,] <- temp_samples$draws(variables = "b")
+  infer_v[i,] <- temp_samples$draws(variables = "v")
+  infer_t[i,] <- temp_samples$draws(variables = "t")
+  infer_FA[i,] <- temp_samples$draws(variables = "FA")
+}
+
+```
+
+
+The true param values:
+```{r}
+true_a <- true_params$a2
+true_b <- true_params$b2
+true_v <- true_params$v2
+true_t <- true_params$t2
+true_FA <- true_params$FA2
+
+# EEA given difficulty d
+true_EEA_given_d <- true_v - 0.2 * conners_d
+true_EEA_given_d <- ifelse(true_EEA_given_d < 0, 0, true_EEA_given_d)
+# Caution given w and d
+true_caut <- true_a + true_params$w * 0.2 * conners_d
+```
+
+
+
+Save recovery data
+```{r}
+recov_df <- data.frame()
+for (i in 1:niter){
+  recov_df <- rbind(recov_df, data.frame("param" = "a", "infer" = infer_a[i,], "iteration" = i, "true" = true_a[i]))
+  recov_df <- rbind(recov_df, data.frame("param" = "b", "infer" = infer_b[i,], "iteration" = i, "true" = true_b[i]))
+  recov_df <- rbind(recov_df, data.frame("param" = "v", "infer" = infer_v[i,], "iteration" = i, "true" = true_v[i]))
+  recov_df <- rbind(recov_df, data.frame("param" = "t", "infer" = infer_t[i,], "iteration" = i, "true" = true_t[i]))
+  recov_df <- rbind(recov_df, data.frame("param" = "FA", "infer" = infer_FA[i,], "iteration" = i, "true" = true_FA[i]))
+}
+
+# write.csv(recov_df, "infer_params_conners_recov_2025-03-10_125332.675184.csv")
+
+recov_df <- read.csv("infer_params_conners_recov_2025-03-10_125332.675184.csv")
+
+recov_summa <- recov_df %>% group_by(param, iteration) %>%
+  summarise(infer_mean = mean(infer),
+            infer_MPD = MPD(infer),
+            ci95up = quantile(infer, probs = c(0.025, 0.975))[2],
+            ci95low = quantile(infer, probs = c(0.025, 0.975))[1],
+            ci50up = quantile(infer, probs = c(0.25, 0.75))[2],
+            ci50low = quantile(infer, probs = c(0.25, 0.75))[1],
+            true = mean(true)
+            )
+
+recov_summa2 <- recov_df %>% dplyr::select(-true) %>% rename("ID" = iteration) %>% 
+  group_by(ID, param) %>%
+  summarize(infer_mean = mean(infer)) %>% 
+  pivot_wider(names_from = param, values_from = infer_mean)
+
+recov_summa2$true_a <- true_a
+recov_summa2$true_b <- true_b
+recov_summa2$true_v <- true_v
+recov_summa2$true_t <- true_t
+recov_summa2$true_FA <- true_FA
+recov_summa2$true_caut <- true_caut
+recov_summa2$true_EEA_given_d <- true_EEA_given_d
+```
+
+
+Visualize recovery
+
+```{r}
+# recov_df %>% filter(param == "a") %>% ggplot() +
+#   geom_point(aes(x = true, y = infer), alpha = 1/10) +
+#   theme_minimal()
+# 
+# recov_summa %>% filter(param == "a") %>% ggplot(aes(x = true, y = infer_MPD)) +
+#   geom_errorbar(aes(ymin = ci95low, ymax=ci95up, width=0)) +
+#   geom_errorbar(aes(ymin = ci50low, ymax=ci50up, width=0), size = 1.1) +
+#   geom_point(size = 1.5, color = "darkblue") +
+#   geom_abline(slope = 1, intercept = 0, color = "red") +
+#   theme_minimal()
+
+
+recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_a, y = a)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal()
+
+recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_b, y = b)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal()
+
+recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_v, y = v)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal()
+
+recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_t, y = t)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal()
+
+recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_FA, y = -FA)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal()
+
+
+library(latex2exp)
+
+recplt_a <- recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_a, y = a)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("a"))),
+       x = expression(paste("True ", italic("a"))),
+       y = expression(paste("Mean inferred ", italic("a")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_b <- recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_b, y = b)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("b"))),
+       x = expression(paste("True ", italic("b"))),
+       y = expression(paste("Mean inferred ", italic("b")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_v <- recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_v, y = v)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("v"))),
+       x = expression(paste("True ", italic("v"))),
+       y = expression(paste("Mean inferred ", italic("v")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_t <- recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_t, y = t)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\tau$"),
+       x = TeX("True $\\tau$"),
+       y = TeX("Mean inferred $\\tau$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_FA <- recov_summa2 %>% ggplot() +
+  geom_point(aes(x = true_FA, y = -FA)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("FA"))),
+       x = expression(paste("True ", italic("FA"))),
+       y = expression(paste("Mean inferred ", italic("FA")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+(recplt_a + recplt_b + recplt_v) / (recplt_t + recplt_FA)
+
+# recov_summa2 %>% ggplot() +
+#   geom_point(aes(x = true_caut, y = a)) +
+#   geom_abline(slope = 1, intercept = 0, color = "red") +
+#   theme_minimal()
+# 
+# recov_summa2 %>% ggplot() +
+#   geom_point(aes(x = true_EEA_given_d, y = v)) +
+#   geom_abline(slope = 1, intercept = 0, color = "red") +
+#   theme_minimal()
+  
+```
+
+
+
+Preservation of ranking, Fit ordinal regressions
+
+```{r}
+library(ordinal)
+niter <- 30
+true_params <- data.frame(true_a, true_b, true_v, true_t, true_FA, ID = seq(niter))
+true_params$rank_a <- rank(true_params$true_a)
+true_params$rank_b <- rank(true_params$true_b)
+true_params$rank_v <- rank(true_params$true_v)
+true_params$rank_t <- rank(true_params$true_t)
+true_params$rank_FA <- rank(true_params$true_FA)
+ranking_d <- true_params %>% dplyr::select(ID, starts_with("rank"))
+
+draws_df <- data.frame()
+for (i in 1:niter){
+  temp <- data.frame(a = recov_df$infer[recov_df$param == "a" & recov_df$iteration == i],
+                     b = recov_df$infer[recov_df$param == "b" & recov_df$iteration == i],
+                     v = recov_df$infer[recov_df$param == "v" & recov_df$iteration == i],
+                     t = recov_df$infer[recov_df$param == "t" & recov_df$iteration == i],
+                     FA = recov_df$infer[recov_df$param == "FA" & recov_df$iteration == i],
+                     ID = i)
+  draws_df <- rbind(draws_df, temp)
+}
+
+draws_df$FA <- - draws_df$FA # Flip sign of the FA effect
+
+
+draws_df <- merge(draws_df, ranking_d, by = "ID") # merge rankings with the draws
+
+draws_df$rank_a <- as.factor(draws_df$rank_a)
+draws_df$rank_b <- as.factor(draws_df$rank_b)
+draws_df$rank_v <- as.factor(draws_df$rank_v)
+draws_df$rank_t <- as.factor(draws_df$rank_t)
+draws_df$rank_FA <- as.factor(draws_df$rank_FA)
+
+draws_df <- draws_df %>% 
+  mutate(
+    a_z = z(a),
+    b_z = z(b),
+    v_z = z(v),
+    t_z = z(t),
+    FA_z = z(FA)
+  )
+
+# Fit models for each param
+
+m_a <- clm(rank_a ~ a_z, data = draws_df)
+m_b <- clm(rank_b ~ b_z, data = draws_df)
+m_v <- clm(rank_v ~ v_z, data = draws_df)
+m_t <- clm(rank_t ~ t_z, data = draws_df)
+m_FA <- clm(rank_FA ~ FA_z, data = draws_df)
+
+
+m_a$coefficients["a_z"]
+m_b$coefficients["b_z"]
+m_v$coefficients["v_z"]
+m_t$coefficients["t_z"]
+m_FA$coefficients["FA_z"]
+
+summary(m_a)
+summary(m_b)
+summary(m_v)
+summary(m_t)
+summary(m_FA)
+
+```
+
+
+
+Mean of absolute errors
+
+```{r}
+# a
+a_abs_err <- array(NA, dim = dim(infer_a))
+for (i in 1:niter){
+  a_abs_err[i,] <- abs(infer_a[i,] - true_a[i])
+}
+a_mean_abs_err <- colMeans(a_abs_err) # Take mean over iterations
+plot(density(a_mean_abs_err))
+
+
+# b
+b_abs_err <- array(NA, dim = dim(infer_b))
+for (i in 1:niter){
+  b_abs_err[i,] <- abs(infer_b[i,] - true_b[i])
+}
+b_mean_abs_err <- colMeans(b_abs_err) # Take mean over iterations
+plot(density(b_mean_abs_err))
+
+
+# v
+v_abs_err <- array(NA, dim = dim(infer_v))
+for (i in 1:niter){
+  v_abs_err[i,] <- abs(infer_v[i,] - true_v[i])
+}
+v_mean_abs_err <- colMeans(v_abs_err) # Take mean over iterations
+plot(density(v_mean_abs_err))
+
+
+# t
+t_abs_err <- array(NA, dim = dim(infer_t))
+for (i in 1:niter){
+  t_abs_err[i,] <- abs(infer_t[i,] - true_t[i])
+}
+t_mean_abs_err <- colMeans(t_abs_err) # Take mean over iterations
+plot(density(t_mean_abs_err))
+
+
+# FA
+FA_abs_err <- array(NA, dim = dim(infer_FA))
+for (i in 1:niter){
+  FA_abs_err[i,] <- abs(infer_FA[i,] - - true_FA[i])
+}
+FA_mean_abs_err <- colMeans(FA_abs_err) # Take mean over iterations
+plot(density(FA_mean_abs_err))
+
+
+
+
+mean_abs_err_df <- data.frame(a_mean_abs_err, b_mean_abs_err, v_mean_abs_err, t_mean_abs_err, FA_mean_abs_err)
+
+
+
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(a_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(b_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(v_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(t_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(FA_mean_abs_err)) +
+  theme_minimal()
+
+
+```
+
+
+
+

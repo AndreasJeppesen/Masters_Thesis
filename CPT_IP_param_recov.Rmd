@@ -1,0 +1,1133 @@
+---
+title: "CPT IP param recov"
+author: "Andreas"
+date: "2025-02-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+Load packages
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, cmdstanr, posterior, ggridges, latex2exp, patchwork)
+
+# defining a function for calculating the maximum of the posterior density (not exactly the same as the mode)
+MPD <- function(x) {
+  density(x)$x[which(density(x)$y==max(density(x)$y))]
+}
+z <- function(x) {
+  return( (x-mean(x))/sd(x) )
+}
+```
+
+
+Load data simulation function
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/simulation_functions/CPT_IP_w_diff_and_linear_caut_wiener_sim_f.R")
+ntrials <- 450
+stimuli <- read.csv("CPT_IP_stimuli.csv")
+nconditions <- 3
+nagents = 1
+```
+
+
+Compile Stan model
+```{r}
+file <- file.path("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_specific_models/CPT_IP_diffusion_model_fixed_d.stan")
+
+wiener_CPT_IP_mod = cmdstan_model(file)
+```
+
+
+Simulate a few sessions to inspect prior and posterior
+
+```{r}
+# Set parameter values
+a <- runif(nagents, 1, 1.7)
+b <- runif(nagents, 0.3, 0.7)
+v <- runif(nagents, 0.8, 1.7)
+t <- runif(nagents, 0.2, 0.25)
+d <- c(0.5, 2, 4)
+FA <- runif(nagents, -1.5, -0.5)
+w <- runif(nagents, 0, 2)
+
+# Simulate data
+sim_dat <- data.frame()
+for (s in 1:nagents){
+  temp_sim <- CPT_IP_w_diff_and_caut_wiener_sim_f(item_type = stimuli$stim_type,
+                                                 v[s], a[s], b[s], t[s], d, FA[s], w[s])
+  temp_sim$ID = s
+  sim_dat <- rbind(sim_dat, temp_sim)
+}
+
+
+# Look at the simulated data
+
+# for (s in 1:nagents){
+#   for (c in 1:nconditions){
+#     plot(density(sim_dat$RT[sim_dat$button_pressed == 1 &
+#                                 sim_dat$correct == 1 &
+#                                 sim_dat$condition == c &
+#                                 sim_dat$ID == s]), main = paste(paste("RTs (Correct trials). Condition", c), paste("agent", s)))
+#     plot(density(sim_dat$RT[sim_dat$button_pressed == 1 &
+#                                 sim_dat$correct == 0 &
+#                                 sim_dat$condition == c &
+#                                 sim_dat$ID == s]), main = paste(paste("RTs (Incorrect trials). Condition", c), paste("agent", s)))
+#   }
+# }
+
+
+
+```
+
+
+
+Set priors
+```{r}
+a_prior_m <- 0
+a_prior_sd <- 1
+b_prior_m <- 0
+b_prior_sd <- 1
+v_prior_m <- 0
+v_prior_sd <- 1
+t_prior_m <- 0
+t_prior_sd <- 1
+# d_prior_m <- 0
+# d_prior_sd <- 1
+FA_prior_m <- 0
+FA_prior_sd <- 1
+w_prior_m <- 0
+w_prior_sd <- 1
+```
+
+
+Fit Stan model
+```{r}
+# Prepare data for Stan
+ntrials <- array(NA, dim = nagents)
+for (s in 1:nagents){
+  ntrials[s] <- length(sim_dat$trial[sim_dat$ID == s]) # number of trials pr participant
+}
+maxntrials <- max(ntrials) # Maximal number of trials a participant has completed
+
+# Empty arrays to fill
+target_present <- array(0, dim = c(maxntrials, nagents))
+button_pressed <- array(0, dim = c(maxntrials, nagents))
+correct <- array(0, dim = c(maxntrials, nagents))
+RT <- array(0, dim = c(maxntrials, nagents))
+falsealarm <- array(0, dim = c(maxntrials, nagents))
+ncorrectRTs <- array(0, dim = nagents)
+nincorrectRTs <- array(0, dim = nagents)
+condition_dum <- array(0, dim = c(maxntrials, nconditions, nagents))
+min_rt <- array(NA, dim = nagents)
+
+for (s in 1:nagents){
+  target_present[1:ntrials[s],s] <- sim_dat$target_present[sim_dat$ID == s]
+  button_pressed[1:ntrials[s],s] <- sim_dat$button_pressed[sim_dat$ID == s]
+  correct[1:ntrials[s],s] <- sim_dat$correct[sim_dat$ID == s]
+  RT[1:ntrials[s],s] <- sim_dat$RT[sim_dat$ID == s]
+  falsealarm[1:ntrials[s],s] <- sim_dat$FA_trial[sim_dat$ID == s]
+  ncorrectRTs[s] <- sum(sim_dat$button_pressed[sim_dat$correct == 1 &
+                                                 sim_dat$RT > 0 &
+                                                 sim_dat$ID == s])
+  nincorrectRTs[s] <- sum(sim_dat$button_pressed[sim_dat$correct == 0 &
+                                                 sim_dat$RT > 0 &
+                                                 sim_dat$ID == s])
+  min_rt[s] <- min(sim_dat$RT[sim_dat$RT > 0 & sim_dat$ID == s])
+  
+  for (i in 1:ntrials[s]){
+    condition_dum[i, sim_dat$condition[sim_dat$ID == s][i], s] <- 1
+  }
+}
+
+
+data <- list(nagents = nagents,
+             ntrials = ntrials,
+             maxntrials = maxntrials,
+             nconditions = nconditions,
+             target_present = target_present,
+             button_pressed = button_pressed,
+             correct = correct,
+             RT = RT,
+             falsealarm = falsealarm,
+             ncorrectRTs = ncorrectRTs,
+             nincorrectRTs = nincorrectRTs,
+             condition_dum = condition_dum,
+             d = d,
+             min_rt = min_rt,
+             
+             a_prior_m = a_prior_m,
+             a_prior_sd = a_prior_sd,
+             b_prior_m = b_prior_m,
+             b_prior_sd = b_prior_sd,
+             v_prior_m = v_prior_m,
+             v_prior_sd = v_prior_sd,
+             t_prior_m = t_prior_m,
+             t_prior_sd = t_prior_sd,
+             FA_prior_m = FA_prior_m,
+             FA_prior_sd = FA_prior_sd,
+             # d_prior_m = d_prior_m,
+             # d_prior_sd = d_prior_sd,
+             w_prior_m = w_prior_m,
+             w_prior_sd = w_prior_sd
+             )
+```
+
+Run model
+
+```{r}
+iter_warmup = 1000
+iter_sampling = 3000
+chains = 3
+
+# Start sampling
+samples <- wiener_CPT_IP_mod$sample(
+  data = data,
+  seed = 123,
+  chains = chains,
+  parallel_chains = chains,
+  iter_warmup = iter_warmup,
+  iter_sampling = iter_sampling,
+  refresh = 100,
+  max_treedepth = 10,
+  adapt_delta = 0.99
+)
+
+draws_df <- as_draws_df(samples$draws())
+
+#write.csv(draws_df, "CPT_IP_lin_caut_fixed_d_2_agents_draws_18022025.csv")
+
+```
+
+
+Load single participant draws
+```{r}
+draws_df <- read.csv("draws_and_true_params/draws_trim_CPT_IP_2025-05-13_102714.267163_agent_1_init0.csv")
+true_params <- read.csv("draws_and_true_params/TGM_fixed_d_and_SD_true_params_2025-03-10_125332.675184.csv")
+
+```
+
+
+
+
+
+Visualize the model fit
+```{r}
+
+# Prior Posterior Update checks
+
+### a
+
+p1 <- draws_df %>% ggplot() +
+  geom_density(aes(`log_a.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_a_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, log(\\textit{a})"),
+       x = TeX("log(\\textit{a})"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+p2 <- draws_df %>% ggplot() +
+  geom_density(aes(`a.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(a_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,6) +
+  geom_vline(xintercept = true_params$a1[1]) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, \\textit{a}"),
+       x = TeX("\\textit{a}"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+### b
+
+p3 <- draws_df %>% ggplot() +
+  geom_density(aes(`logit_b.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(logit_b_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, logit(\\textit{b})"),
+       x = TeX("logit(\\textit{b})"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+p4 <- draws_df %>% ggplot() +
+  geom_density(aes(`b.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(b_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,1) +
+  geom_vline(xintercept = true_params$b1[1]) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, \\textit{b}"),
+       x = TeX("\\textit{b}"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+### v
+
+p5 <- draws_df %>% ggplot() +
+  geom_density(aes(`log_v.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_v_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, log(\\textit{v})"),
+       x = TeX("log(\\textit{v})"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+p6 <- draws_df %>% ggplot() +
+  geom_density(aes(`v.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(v_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,6) +
+  geom_vline(xintercept = true_params$v1[1]) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, \\textit{v}"),
+       x = TeX("\\textit{v}"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+### t
+
+p7 <- draws_df %>% ggplot() +
+  geom_density(aes(`cont_t.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(cont_t_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, continuous $\\tau$"),
+       x = TeX("Continuous $\\tau$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+p8 <- draws_df %>% ggplot() +
+  geom_density(aes(`t.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(t_prior.1.), fill = "blue", alpha = 0.3) +
+  xlim(0,0.3) +
+  geom_vline(xintercept = true_params$t1[1]) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, $\\tau$"),
+       x = TeX("$\\tau$"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+### w
+
+p9 <- draws_df %>% ggplot() +
+  geom_density(aes(`log_w.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_w_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, log(\\textit{w})"),
+       x = TeX("log(\\textit{w})"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+p10 <- draws_df %>% ggplot() +
+  geom_density(aes(`w.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(w_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,6) +
+  geom_vline(xintercept = true_params$w[1]) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, \\textit{w}"),
+       x = TeX("\\textit{w}"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+
+### FA
+
+p11 <- draws_df %>% ggplot() +
+  geom_density(aes(`log_FA.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(log_FA_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, log(\\textit{FA})"),
+       x = TeX("log(\\textit{FA})"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+p12 <- draws_df %>% ggplot() +
+  geom_density(aes(`FA.1.`), fill = "red", alpha = 0.3) +
+  geom_density(aes(FA_prior), fill = "blue", alpha = 0.3) +
+  xlim(0,6) +
+  geom_vline(xintercept = - true_params$FA1[1]) +
+  theme_minimal() +
+  labs(title = TeX("PPU check, \\textit{FA}"),
+       x = TeX("\\textit{FA}"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+(p1 + p3 + p5 + p7 + p9 + p11) / (p2 + p4 + p6 + p8 + p10 + p12)
+
+
+```
+
+
+Chain checks
+
+```{r}
+ccp1 <- draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_a.1., color = as.factor(.chain))) +
+  theme(legend.position = "none")
+
+ccp2 <- draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_v.1., color = as.factor(.chain))) +
+  theme(legend.position = "none")
+
+ccp3 <- draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = logit_b.1., color = as.factor(.chain))) +
+  theme(legend.position = "none")
+
+ccp4 <- draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = cont_t.1., color = as.factor(.chain))) +
+  theme(legend.position = "none")
+
+ccp5 <- draws_df %>% ggplot() +
+  geom_line(aes(x = .iteration, y = log_w.1., color = as.factor(.chain)))
+
+(ccp1 + ccp2 + ccp3) / (ccp4 + ccp5)
+```
+
+
+
+
+PP checks
+
+```{r}
+source("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/visualization_functions/wiener_ppcheck_v2.R")
+```
+
+
+Load Simulated data
+```{r}
+sim_dat <- read.csv("TGM_fixed_d_and_SD_sim_dat_2025-03-10_125332.675184.csv")
+
+d_vec <- c(0.5, 2, 4)
+```
+
+```{r}
+correct_RTs <- sim_dat$RT[sim_dat$correct == 1 & sim_dat$button_pressed == 1 & sim_dat$ID == 1]
+ntrials_pr_condition <- c(150,150,150)
+nconditions <- 3
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df$a.1.[draws_df$ID == 1],
+               b_samples = draws_df$b.1.[draws_df$ID == 1],
+               v_samples = draws_df$v.1.[draws_df$ID == 1],
+               t_samples = draws_df$t.1.[draws_df$ID == 1],
+               w_samples = draws_df$w.1.[draws_df$ID == 1],
+               nconditions = nconditions,
+               d = d_vec
+               )
+
+wiener_ppcheck(RT_data = correct_RTs,
+               ntrials_pr_condition = ntrials_pr_condition, 
+               a_samples = draws_df$a_prior[draws_df$ID == 1],
+               b_samples = draws_df$b_prior[draws_df$ID == 1],
+               v_samples = draws_df$v_prior[draws_df$ID == 1],
+               t_samples = draws_df$t_prior.1.[draws_df$ID == 1],
+               w_samples = draws_df$w_prior[draws_df$ID == 1],
+               nconditions = nconditions,
+               d = d_vec, 
+               prior_only = TRUE
+               )
+```
+
+
+PP checks of hit rate and com. rate
+
+```{r}
+theta <- function(a, b, v, w, d, FA, target_present) {
+  if (target_present == 1){
+    bias <- b
+  } else {
+    bias <- rep(1, length(b)) - b
+  }
+  EEA_given_d <- v - (0.2 * d)
+  EEA_given_d <- ifelse(EEA_given_d < 0, 0, EEA_given_d)
+  EEA <- EEA_given_d - FA
+  caut <- a + (0.2 * w * d)
+  
+  thet <- 1-( (1 - exp(-2*EEA*caut*(1-bias))) / (exp(2*EEA*caut*bias) - exp(-2*EEA*caut*(1-bias))) )
+  thet <- ifelse(is.nan(thet), bias, thet)
+  return(thet)
+}
+```
+
+
+Hit Rate
+```{r}
+# Prior hitrate
+
+n_conditions <- 3
+theta_prior <- array(NA, dim = c(12000, 3))
+
+for (c in 1:3) {
+  for (i in 1:12000){}
+    theta_prior[,c] <- theta(draws_df$a_prior,
+                                draws_df$b_prior,
+                                draws_df$v_prior,
+                                draws_df$w_prior,
+                                d = d_vec[c],
+                                FA = 0,
+                                target_present = 1)
+}
+
+hit_rate_prior_df <- data.frame(theta_prior)
+
+colnames(hit_rate_prior_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+hit_rate_prior_df <- hit_rate_prior_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+cond_order <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+hit_rate_prior_df <- hit_rate_prior_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+
+hit_rate_prior_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Prior Hit Rate predictions",
+       x = "Hit Rate",
+       y = "Density") +
+  theme(text = element_text(size = 14, family = "serif"))
+```
+
+
+```{r}
+# Posterior hit rate
+
+theta_post <- array(NA, dim = c(12000, 3))
+
+for (c in 1:3) {
+  for (i in 1:12000){}
+    theta_post[,c] <- theta(draws_df$a.1.,
+                                draws_df$b.1.,
+                                draws_df$v.1.,
+                                draws_df$w.1.,
+                                d = d_vec[c],
+                                FA = 0,
+                                target_present = 1)
+}
+
+hit_rate_post_df <- data.frame(theta_post)
+
+colnames(hit_rate_post_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+hit_rate_post_df <- hit_rate_post_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+cond_order <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+
+hit_rate_post_df <- hit_rate_post_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+hit_rate_post_df$cond_num <- as.numeric(str_sub(hit_rate_post_df$Condition, -1, -1))
+
+true_hitrate <- data.frame("cond_num" = c(1,2,3), "true_hitrate" = NA)
+for (c in 1:n_conditions){
+  true_hitrate$true_hitrate[c] <- sum(sim_dat$button_pressed[sim_dat$target_present == 1 &
+                                                  sim_dat$ID == 1 &
+                                                  sim_dat$condition == c]) / 30
+}
+true_hitrate$true_hitrate[2] <- true_hitrate$true_hitrate[2] + 0.003
+
+hit_rate_post_df <- merge(hit_rate_post_df, true_hitrate, by = "cond_num")
+
+hit_rate_post_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  geom_vline(aes(xintercept = true_hitrate, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Posterior Hit Rate predictions",
+       x = "Hit Rate",
+       y = "Density") +
+  guides(color = guide_legend(title = "Condition")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+```
+
+
+Com. Rate
+```{r}
+# Prior comrate
+
+n_conditions <- 3
+theta_prior <- array(NA, dim = c(12000, 3))
+
+for (c in 1:3) {
+  for (i in 1:12000){}
+    theta_prior[,c] <- 1-theta(draws_df$a_prior,
+                                draws_df$b_prior,
+                                draws_df$v_prior,
+                                draws_df$w_prior,
+                                d = d_vec[c],
+                                FA = 0,
+                                target_present = 1)
+}
+
+com_rate_prior_df <- data.frame(theta_prior)
+
+colnames(com_rate_prior_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+com_rate_prior_df <- com_rate_prior_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+cond_order <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+com_rate_prior_df <- com_rate_prior_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+
+com_rate_prior_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Prior Com. Rate predictions",
+       x = "Hit Rate",
+       y = "Density") +
+  theme(text = element_text(size = 14, family = "serif"))
+```
+
+
+```{r}
+# Posterior com rate
+
+theta_post <- array(NA, dim = c(12000, 3))
+
+for (c in 1:3) {
+  for (i in 1:12000){}
+    theta_post[,c] <- 1 - theta(draws_df$a.1.,
+                                draws_df$b.1.,
+                                draws_df$v.1.,
+                                draws_df$w.1.,
+                                d = d_vec[c],
+                                FA = 0,
+                                target_present = 1)
+}
+
+com_rate_post_df <- data.frame(theta_post)
+
+colnames(com_rate_post_df) <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+com_rate_post_df <- com_rate_post_df %>% pivot_longer(names_to = "Condition", cols = everything())
+
+cond_order <- c("CPT-IP cond. 1", "CPT-IP cond. 2", "CPT-IP cond. 3")
+
+com_rate_post_df <- com_rate_post_df %>% 
+  mutate(Condition = factor(Condition, levels = cond_order)) %>% 
+  arrange(Condition)
+
+com_rate_post_df$cond_num <- as.numeric(str_sub(com_rate_post_df$Condition, -1, -1))
+
+true_comrate <- data.frame("cond_num" = c(1,2,3), "true_comrate" = NA)
+for (c in 1:n_conditions){
+  true_comrate$true_comrate[c] <- sum(sim_dat$button_pressed[sim_dat$target_present == 0 &
+                                                  sim_dat$ID == 1 &
+                                                  sim_dat$condition == c]) / 120
+}
+#true_comrate$true_comrate[2] <- true_comrate$true_comrate[2] + 0.003
+
+com_rate_post_df <- merge(com_rate_post_df, true_comrate, by = "cond_num")
+
+
+com_rate_post_df %>% 
+  ggplot() +
+  geom_density(aes(value, color = Condition)) +
+  geom_vline(aes(xintercept = true_comrate, color = Condition)) +
+  theme_minimal() +
+  labs(title = "Posterior Com. Rate predictions",
+       x = "Com. Rate",
+       y = "Density") +
+  guides(color = guide_legend(title = "Condition")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+```
+
+
+
+
+```{r}
+"""
+# Hit rate
+n_target_trials <- 90
+# Prior
+
+theta_prior <- array(NA, dim = c(12000, nconditions))
+theta_prior[, 1] <- draws_df$Hit_Rate_prior.3.
+theta_prior[, 2] <- draws_df$Hit_Rate_prior.153.
+theta_prior[, 3] <- draws_df$Hit_Rate_prior.303.
+
+n_hits_prior <- array(NA, dim = 3000)
+sample_idx <- floor(runif(3000, min = 1, max = nrow(draws_df)))
+
+for (i in 1:length(sample_idx)){
+  idx <- sample_idx[i]
+  temp <- 0
+  
+  for (c in 1:nconditions){
+    temp <- temp + rbinom(1, n_target_trials/3, theta_prior[idx,c])
+  }
+  n_hits_prior[i] <- temp
+}
+
+
+
+
+
+
+# Posterior
+theta <- array(NA, dim = c(12000, nconditions))
+theta[, 1] <- draws_df$theta.3.1.
+theta[, 2] <- draws_df$theta.153.1.
+theta[, 3] <- draws_df$theta.303.1.
+
+
+n_hits_post <- array(NA, dim = 3000)
+sample_idx <- floor(runif(3000, min = 1, max = nrow(draws_df)))
+
+for (i in 1:length(sample_idx)){
+  idx <- sample_idx[i]
+  temp <- 0
+  
+  for (c in 1:nconditions){
+    temp <- temp + rbinom(1, n_target_trials/3, theta_random[idx,c])
+  }
+  n_hits_post[i] <- temp
+}
+
+hits <- data.frame(n_hits_prior = n_hits_prior, n_hits_post = n_hits_post)
+hits <- hits %>% mutate(
+  hitrate_prior = n_hits_prior / 90,
+  hitrate_post = n_hits_post / 90
+)
+
+hits %>% ggplot() +
+  geom_density(aes(x = hitrate_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("Prior Hit Rate prediction"),
+       x = TeX("Hit Rate"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+true_hitrate <- sum(sim_dat$button_pressed[sim_dat$ID == 1 & sim_dat$target_present == 1 & sim_dat$task_name == "CPT-IP"]) / n_target_trials
+
+hits %>% ggplot() +
+  geom_density(aes(x = hitrate_post), fill = "red", alpha = 0.3) +
+  theme_minimal() +
+  geom_vline(xintercept = true_hitrate) +
+  labs(title = TeX("Posterior Hit Rate prediction"),
+       x = TeX("Hit Rate"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+
+### Com. rate is seen on theta for distractor trials
+### varies between FA trials and random trials, so we do both
+
+# random trial : 1, 151, 301
+# FA trial : 5, 295, 305
+n_FA_trials <- sum(sim_dat$FA_trial[sim_dat$task_name == "CPT-IP" & sim_dat$ID == 1])
+n_ran_trials <- 450 - sum(sim_dat$target_present[sim_dat$task_name == "CPT-IP" & sim_dat$ID == 1]) - n_FA_trials
+
+
+# generate predictions of commisions
+
+# Prior
+
+theta_random_prior <- array(NA, dim = c(12000, nconditions))
+theta_random_prior[, 1] <- draws_df$Hit_Rate_prior.1.
+theta_random_prior[, 2] <- draws_df$Hit_Rate_prior.151.
+theta_random_prior[, 3] <- draws_df$Hit_Rate_prior.301.
+
+theta_FA_prior <- array(NA, dim = c(12000, nconditions))
+theta_FA_prior[, 1] <- draws_df$Hit_Rate_prior.5.
+theta_FA_prior[, 2] <- draws_df$Hit_Rate_prior.295.
+theta_FA_prior[, 3] <- draws_df$Hit_Rate_prior.305.
+
+n_coms_prior <- array(NA, dim = 3000)
+sample_idx <- floor(runif(3000, min = 1, max = nrow(draws_df)))
+
+for (i in 1:length(sample_idx)){
+  idx <- sample_idx[i]
+  temp <- 0
+  
+  for (c in 1:nconditions){
+    temp <- temp + rbinom(1, n_ran_trials/3, 1-theta_random_prior[idx,c])
+    temp <- temp + rbinom(1, n_FA_trials/3, 1-theta_FA_prior[idx,c])
+  }
+  n_coms_prior[i] <- temp
+}
+
+
+
+# Posterior
+theta_random <- array(NA, dim = c(12000, nconditions))
+theta_random[, 1] <- draws_df$theta.1.1.
+theta_random[, 2] <- draws_df$theta.151.1.
+theta_random[, 3] <- draws_df$theta.301.1.
+
+theta_FA <- array(NA, dim = c(12000, nconditions))
+theta_FA[, 1] <- draws_df$theta.5.1.
+theta_FA[, 2] <- draws_df$theta.295.1.
+theta_FA[, 3] <- draws_df$theta.305.1.
+
+n_coms_post <- array(NA, dim = 3000)
+sample_idx <- floor(runif(3000, min = 1, max = nrow(draws_df)))
+
+for (i in 1:length(sample_idx)){
+  idx <- sample_idx[i]
+  temp <- 0
+  
+  for (c in 1:nconditions){
+    temp <- temp + rbinom(1, n_ran_trials/3, 1-theta_random[idx,c])
+    temp <- temp + rbinom(1, n_FA_trials/3, 1-theta_FA[idx,c])
+  }
+  n_coms_post[i] <- temp
+}
+
+coms <- data.frame(n_coms_prior = n_coms_prior, n_coms_post = n_coms_post)
+coms <- coms %>% mutate(
+  comrate_prior = n_coms_prior / 360,
+  comrate_post = n_coms_post / 360
+)
+
+coms %>% ggplot() +
+  geom_density(aes(x = comrate_prior), fill = "blue", alpha = 0.3) +
+  theme_minimal() +
+  labs(title = TeX("Prior Com. Rate prediction"),
+       x = TeX("Com. Rate"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+true_comrate <- sum(sim_dat$button_pressed[sim_dat$ID == 1 & sim_dat$target_present == 0 & sim_dat$task_name == "CPT-IP"]) / (n_ran_trials + n_FA_trials)
+
+coms %>% ggplot() +
+  geom_density(aes(x = comrate_post), fill = "red", alpha = 0.3) +
+  theme_minimal() +
+  geom_vline(xintercept = true_comrate) +
+  labs(title = TeX("Posterior Com. Rate prediction"),
+       x = TeX("Com. Rate"),
+       y = TeX("Density")) +
+  theme(text = element_text(size = 14, family = "serif"))
+"""
+```
+
+
+
+
+
+
+Load recovery data with 30 agents and fixed d, now linear caut
+```{r}
+filenames <- list.files(path = "C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_specific_models/draws_and_true_params", pattern = "draws_trim_CPT_IP_2025-05-12_092117.7064_agent_\\d+_init0.csv")
+
+draws_df <- data.frame()
+
+for (filename in filenames) {
+  single_agent_draws <- read.csv(paste0("draws_and_true_params/", filename))
+  draws_df <- rbind(draws_df, single_agent_draws)
+}
+
+
+```
+
+```{r}
+draws_df <- draws_df %>% dplyr::select(-X)
+true_params <- true_params %>% dplyr::select(-X) %>% 
+  dplyr::select(s, a1, b1, v1, t1, w, FA1)
+
+colnames(draws_df) <- c("a", "b", "v", "t", "FA", "w", "ID")
+
+colnames(true_params) <- c("ID", "true_a", "true_b","true_v", "true_t", "true_w", "true_FA")
+
+recov_summa <- draws_df %>% group_by(ID) %>% summarize(a = mean(a),
+                                                      b = mean(b),
+                                                      v = mean(v),
+                                                      t = mean(t),
+                                                      FA = mean(FA),
+                                                      w = mean(w))
+recov_summa <- merge(recov_summa, true_params, by = "ID")
+
+```
+
+
+Visualize recovery
+
+```{r}
+library(latex2exp)
+
+recplt_a <- recov_summa %>% ggplot() +
+  geom_point(aes(x = true_a, y = a)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("a"))),
+       x = expression(paste("True ", italic("a"))),
+       y = expression(paste("Mean inferred ", italic("a")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_b <- recov_summa %>% ggplot() +
+  geom_point(aes(x = true_b, y = b)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("b"))),
+       x = expression(paste("True ", italic("b"))),
+       y = expression(paste("Mean inferred ", italic("b")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_v <- recov_summa %>% ggplot() +
+  geom_point(aes(x = true_v, y = v)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("v"))),
+       x = expression(paste("True ", italic("v"))),
+       y = expression(paste("Mean inferred ", italic("v")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_t <- recov_summa %>% ggplot() +
+  geom_point(aes(x = true_t, y = t)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = TeX("Recovery of parameter $\\tau$"),
+       x = TeX("True $\\tau$"),
+       y = TeX("Mean inferred $\\tau$")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_w <- recov_summa %>% ggplot() +
+  geom_point(aes(x = true_w, y = w)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("w"))),
+       x = expression(paste("True ", italic("w"))),
+       y = expression(paste("Mean inferred ", italic("w")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+recplt_FA <- recov_summa %>% ggplot() +
+  geom_point(aes(x = true_FA, y = -FA)) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  labs(title = expression(paste("Recovery of parameter ", italic("FA"))),
+       x = expression(paste("True ", italic("FA"))),
+       y = expression(paste("Mean inferred ", italic("FA")))) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+(recplt_a + recplt_b + recplt_v) / (recplt_t + recplt_w + recplt_FA)
+```
+
+
+
+
+
+
+
+
+
+
+Fit ordinal regression
+```{r}
+library(ordinal)
+# Get ranking of the true parameters
+true_params$rank_a <- rank(true_params$true_a)
+true_params$rank_b <- rank(true_params$true_b)
+true_params$rank_v <- rank(true_params$true_v)
+true_params$rank_t <- rank(true_params$true_t)
+true_params$rank_w <- rank(true_params$true_w)
+true_params$rank_FA <- rank(true_params$true_FA)
+ranking_d <- true_params %>% dplyr::select(ID, starts_with("rank"))
+
+
+draws_df <- merge(draws_df, ranking_d, by = "ID") # merge rankings with the draws
+
+draws_df$FA <- - draws_df$FA # Flip sign of the FA effect
+
+draws_df$rank_a <- as.factor(draws_df$rank_a)
+draws_df$rank_b <- as.factor(draws_df$rank_b)
+draws_df$rank_v <- as.factor(draws_df$rank_v)
+draws_df$rank_t <- as.factor(draws_df$rank_t)
+draws_df$rank_w <- as.factor(draws_df$rank_w)
+draws_df$rank_FA <- as.factor(draws_df$rank_FA)
+
+# Get z-scores
+draws_df <- draws_df %>% 
+  mutate(
+    a_z = z(a),
+    b_z = z(b),
+    v_z = z(v),
+    t_z = z(t),
+    w_z = z(w),
+    FA_z = z(FA)
+  )
+
+
+# Fit models for each param
+
+m_a <- clm(rank_a ~ a_z, data = draws_df)
+m_b <- clm(rank_b ~ b_z, data = draws_df)
+m_v <- clm(rank_v ~ v_z, data = draws_df)
+m_t <- clm(rank_t ~ t_z, data = draws_df)
+m_w <- clm(rank_w ~ w_z, data = draws_df)
+m_FA <- clm(rank_FA ~ FA_z, data = draws_df)
+
+
+m_a$coefficients["a_z"]
+m_b$coefficients["b_z"]
+m_v$coefficients["v_z"]
+m_t$coefficients["t_z"]
+m_w$coefficients["w_z"]
+# m_FA$coefficients["FA_z"]
+
+
+summary(m_a)
+summary(m_b)
+summary(m_v)
+summary(m_t)
+summary(m_w)
+# summary(m_FA)
+```
+
+
+
+
+
+
+Get distribution of mean absolute error error for each param.
+
+Mean of absolute errors
+
+```{r}
+nagents <- 30
+niter <- 12000
+
+
+
+# a
+infer_a <- array(draws_df$a, dim = c(niter, nagents))
+infer_a <- t(infer_a) # transpose so that we have a row for each agent and column for each sample
+a_abs_err <- array(NA, dim = dim(infer_a))
+for (i in 1:nagents){
+  a_abs_err[i,] <- abs(infer_a[i,] - true_params$true_a[i])
+}
+a_mean_abs_err <- colMeans(a_abs_err)
+plot(density(a_mean_abs_err))
+
+
+# b
+infer_b <- array(draws_df$b, dim = c(niter, nagents))
+infer_b <- t(infer_b) # transpose so that we have a row for each agent and column for each sample
+b_abs_err <- array(NA, dim = dim(infer_b))
+for (i in 1:nagents){
+  b_abs_err[i,] <- abs(infer_b[i,] - true_params$true_b[i])
+}
+b_mean_abs_err <- colMeans(b_abs_err)
+plot(density(b_mean_abs_err))
+
+
+
+# v
+infer_v <- array(draws_df$v, dim = c(niter, nagents))
+infer_v <- t(infer_v) # transpose so that we have a row for each agent and column for each sample
+v_abs_err <- array(NA, dim = dim(infer_v))
+for (i in 1:nagents){
+  v_abs_err[i,] <- abs(infer_v[i,] - true_params$true_v[i])
+}
+v_mean_abs_err <- colMeans(v_abs_err)
+plot(density(v_mean_abs_err))
+
+
+# t
+infer_t <- array(draws_df$t, dim = c(niter, nagents))
+infer_t <- t(infer_t) # transpose so that we have a row for each agent and column for each sample
+t_abs_err <- array(NA, dim = dim(infer_t))
+for (i in 1:nagents){
+  t_abs_err[i,] <- abs(infer_t[i,] - true_params$true_t[i])
+}
+t_mean_abs_err <- colMeans(t_abs_err)
+plot(density(t_mean_abs_err))
+
+
+# w
+infer_w <- array(draws_df$w, dim = c(niter, nagents))
+infer_w <- t(infer_w) # transpose so that we have a row for each agent and column for each sample
+w_abs_err <- array(NA, dim = dim(infer_w))
+for (i in 1:nagents){
+  w_abs_err[i,] <- abs(infer_w[i,] - true_params$true_w[i])
+}
+w_mean_abs_err <- colMeans(w_abs_err)
+plot(density(w_mean_abs_err))
+
+
+# FA
+infer_FA <- array(draws_df$FA, dim = c(niter, nagents))
+infer_FA <- t(infer_FA) # transpose so that we have a row for each agent and column for each sample
+FA_abs_err <- array(NA, dim = dim(infer_FA))
+for (i in 1:nagents){
+  FA_abs_err[i,] <- abs(infer_FA[i,] - true_params$true_FA[i])
+}
+FA_mean_abs_err <- colMeans(FA_abs_err)
+plot(density(FA_mean_abs_err))
+
+
+
+
+mean_abs_err_df <- data.frame(a_mean_abs_err, b_mean_abs_err, v_mean_abs_err, t_mean_abs_err, w_mean_abs_err, FA_mean_abs_err)
+
+
+
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(a_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(b_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(v_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(t_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(w_mean_abs_err)) +
+  theme_minimal()
+mean_abs_err_df %>% ggplot() +
+  geom_density(aes(FA_mean_abs_err)) +
+  theme_minimal()
+```
+
+
+
+
+Check correlations
+
+```{r}
+recov_summa <- recov_summa %>%
+  mutate(a_error = a - true_a,
+         b_error = b - true_b,
+         v_error = v - true_v,
+         t_error = t - true_t,
+         w_error = w - true_w)
+```
+
+```{r}
+recov_summa %>% ggplot() +
+  geom_point(aes(a_error, w_error))
+cor(recov_summa$a_error, recov_summa$w_error)
+
+recov_summa %>% ggplot() +
+  geom_point(aes(a, w))
+
+recov_summa %>% ggplot() +
+  geom_point(aes(a_error, v_error))
+```
+
+
+
+
