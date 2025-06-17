@@ -1,0 +1,188 @@
+---
+title: "Preservation of rank"
+author: "Andreas"
+date: "2025-05-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, readxl, ordinal, latex2exp)
+```
+
+
+
+
+#### Run ordinal regression models on traditional measures
+
+Load simulated data and true params
+```{r}
+sim_dat <- read.csv("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/TGM_fixed_d_and_SD_sim_dat_2025-03-10_125332.675184.csv")
+true_params <- read.csv("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/Task_general_model/draws_and_true_params/TGM_fixed_d_and_SD_true_params_2025-03-10_125332.675184.csv")
+```
+
+
+```{r}
+# Get ranking of the true parameters (means)
+true_params$rank_a <- rank(true_params$a_m)
+true_params$rank_b <- rank(true_params$b_m)
+true_params$rank_v <- rank(true_params$v_m)
+true_params$rank_t <- rank(true_params$t_m)
+ranking_d <- true_params %>% dplyr::select(s, starts_with("rank"))
+ranking_d <- ranking_d %>% rename("ID" = s)
+```
+
+Calculate traditional measures for each condition
+```{r}
+HitRT <- sim_dat %>% group_by(ID, condition) %>% filter(button_pressed == 1 & correct == 1) %>% 
+  summarize("HitRT" = mean(RT))
+
+hitrate <- data.frame(ID = HitRT$ID, condition = HitRT$condition, hitrate = NA)
+ntargets_pr_cond <- c(30, 30, 30, 324, 24)
+for (id in 1:30) {
+  for (c in 1:5) {
+    hitrate$hitrate[hitrate$ID == id & hitrate$condition == c] <- sum(sim_dat$button_pressed[sim_dat$ID == id & sim_dat$condition == c & sim_dat$target_present == 1] / ntargets_pr_cond[c])
+  }
+}
+
+
+comrate <- data.frame(ID = HitRT$ID, condition = HitRT$condition, comrate = NA)
+ntrials_pr_cond <- c(150, 150, 150, 360, 300)
+ndistractors_pr_cond <- ntrials_pr_cond - ntargets_pr_cond
+for (id in 1:30) {
+  for (c in 1:5) {
+    comrate$comrate[comrate$ID == id & comrate$condition == c] <- sum(sim_dat$button_pressed[sim_dat$ID == id & sim_dat$condition == c & sim_dat$target_present == 0] / ndistractors_pr_cond[c])
+  }
+}
+
+# Create traditional measures dataset
+tm_d <- merge(HitRT, hitrate, by = c("ID", "condition"))
+tm_d <- merge(tm_d, comrate, by = c("ID", "condition"))
+```
+
+Standardize the measures within condition
+```{r}
+tm_d$HitRT_z <- NA
+tm_d$hitrate_z <- NA
+tm_d$comrate_z <- NA
+
+# The below loops over conditions, computing z-scores based on means and sds specific to that condition
+for (c in 1:5) {
+  tm_d$HitRT_z <- ifelse(tm_d$condition == c,
+                         (tm_d$HitRT - mean(tm_d$HitRT[tm_d$condition == c])) /
+                           sd(tm_d$HitRT[tm_d$condition == c]),
+                         tm_d$HitRT_z)
+  tm_d$hitrate_z <- ifelse(tm_d$condition == c,
+                         (tm_d$hitrate - mean(tm_d$hitrate[tm_d$condition == c])) /
+                           sd(tm_d$hitrate[tm_d$condition == c]),
+                         tm_d$hitrate_z)
+  tm_d$comrate_z <- ifelse(tm_d$condition == c,
+                         (tm_d$comrate - mean(tm_d$comrate[tm_d$condition == c])) /
+                           sd(tm_d$comrate[tm_d$condition == c]),
+                         tm_d$comrate_z)
+}
+```
+
+And now merge with the rankings by ID
+
+```{r}
+tm_d <- merge(tm_d, ranking_d, by = "ID")
+```
+
+
+Ordinal regression
+```{r}
+tm_d$rank_a <- as.factor(tm_d$rank_a)
+tm_d$rank_b <- as.factor(tm_d$rank_b)
+tm_d$rank_v <- as.factor(tm_d$rank_v)
+tm_d$rank_t <- as.factor(tm_d$rank_t)
+
+
+# Fit models for each param, for each measure
+
+m1_a <- clm(rank_a ~ HitRT_z, data = tm_d)
+m1_b <- clm(rank_b ~ HitRT_z, data = tm_d)
+m1_v <- clm(rank_v ~ HitRT_z, data = tm_d)
+m1_t <- clm(rank_t ~ HitRT_z, data = tm_d)
+
+
+m2_a <- clm(rank_a ~ hitrate_z, data = tm_d)
+m2_b <- clm(rank_b ~ hitrate_z, data = tm_d)
+m2_v <- clm(rank_v ~ hitrate_z, data = tm_d)
+m2_t <- clm(rank_t ~ hitrate_z, data = tm_d)
+
+
+m3_a <- clm(rank_a ~ comrate_z, data = tm_d)
+m3_b <- clm(rank_b ~ comrate_z, data = tm_d)
+m3_v <- clm(rank_v ~ comrate_z, data = tm_d)
+m3_t <- clm(rank_t ~ comrate_z, data = tm_d)
+
+
+summary(m1_a)
+summary(m1_b)
+summary(m1_v)
+summary(m1_t)
+
+summary(m2_a)
+summary(m2_b)
+summary(m2_v)
+summary(m2_t)
+
+summary(m3_a)
+summary(m3_b)
+summary(m3_v)
+summary(m3_t)
+
+```
+
+
+
+
+Load eta-estimate data
+```{r}
+d <- read_excel("C:/Users/andre/OneDrive - Aarhus universitet/Cognitive Science/Kandidat/Speciale/Analysis/rank_preservation_model_comparison.xlsx")
+```
+
+
+Visualize results
+```{r}
+d$est <- ifelse(d$do_abs_est == 1, abs(d$estimate), d$estimate)
+d$param <- str_sub(d$parameter, 1, 1)
+
+d$param <- ifelse(d$param == "t", "tau", d$param)
+
+param_order <- c("a", "b", "v", "tau", "w")
+d <- d %>% 
+  mutate(param = factor(param, levels = param_order)) %>% 
+  arrange(param)
+
+d$model <- ifelse(d$model == "HitRT", "Hit RT", d$model)
+d$model <- ifelse(d$model == "hitrate", "Hit rate", d$model)
+d$model <- ifelse(d$model == "comrate", "Com. rate", d$model)
+
+model_order <- c("TGM", "CPT-IP", "Conners", "RVP", "Hit RT", "Hit rate", "Com. rate")
+
+d <- d %>% 
+  mutate(model = factor(model, levels = model_order)) %>% 
+  arrange(model)
+
+
+d %>% 
+  filter(param != "F") %>% 
+  ggplot() +
+  geom_point(aes(x = param, y = est, color = model)) +
+  geom_line(aes(x = param, y = est, color = model, group = model)) +
+  theme_minimal() +
+  labs(title = "Preservation of true parameter rankings",
+       x = "Parameter",
+       y = TeX("$\\eta$-estimate")) +
+  guides(color = guide_legend(title = "Model")) +
+  theme(text = element_text(size = 14, family = "serif"))
+
+```
+
+
